@@ -37,20 +37,25 @@ async function generateReport() {
             fetchBoard(),
             runtimeStore.readHistory()
         ]);
-        const items = await fetchOpenSnapItems(board);
+        const [populations, recentShipped] = await Promise.all([
+            fetchOpenOrderItems(board),
+            fetchRecentShippedItems(board, central.dateKey, 7)
+        ]);
         const previousSnapshot = findComparisonSnapshot(history, central.dateKey, config.TREND_COMPARISON_DAYS);
-        const report = summarize(items, previousSnapshot);
-        console.log(`Open SNAP orders: ${report.total}; average age: ${report.averageAge ?? 'n/a'} days; over 30 days: ${report.over30Days}.`);
-        console.log(`Current Dept / Status: ${Object.entries(report.byCurrentStatus).sort((a, b) => b[1] - a[1]).map(([status, count]) => `${status}=${count}`).join(', ')}`);
+        const factoryReport = summarize(populations.factorySnap, comparisonForPopulation(previousSnapshot, 'factorySnap', true));
+        const fieldServiceReport = summarize(populations.fieldService, comparisonForPopulation(previousSnapshot, 'fieldService'));
+        logPopulationSummary('Factory SNAP/PIRF', factoryReport);
+        logPopulationSummary('Field-issued', fieldServiceReport);
+        console.log(`Recently shipped in the last 7 days: ${recentShipped.length}.`);
 
         history[central.dateKey] = {
-            total: report.total,
-            byCurrentStatus: report.byCurrentStatus
+            factorySnap: snapshotFromReport(factoryReport),
+            fieldService: snapshotFromReport(fieldServiceReport)
         };
         pruneHistory(history, config.HISTORY_RETENTION_DAYS, central.dateKey);
         await runtimeStore.writeHistory(history);
 
-        const html = generateHtml(report, history, central.dateKey);
+        const html = generateHtml(factoryReport, fieldServiceReport, recentShipped, history, central.dateKey);
         const outputPath = saveHtml(html, central.dateKey);
         console.log(`HTML preview saved: ${outputPath}`);
 
@@ -104,8 +109,12 @@ async function fetchBoard() {
     return board;
 }
 
-async function fetchOpenSnapItems(board) {
-    const items = [];
+async function fetchOpenOrderItems(board) {
+    const populations = { factorySnap: [], fieldService: [] };
+    const populationByGroup = {
+        [config.SNAP_GROUP_ID]: 'factorySnap',
+        [config.FIELD_SERVICE_GROUP_ID]: 'fieldService'
+    };
     const columnIds = Object.values(config.COL_IDS);
     let cursor = null;
 
@@ -125,7 +134,8 @@ async function fetchOpenSnapItems(board) {
 
         const page = data.boards[0]?.items_page;
         for (const rawItem of page?.items || []) {
-            if (rawItem.state !== 'active' || rawItem.group?.id !== config.SNAP_GROUP_ID) {
+            const population = populationByGroup[rawItem.group?.id];
+            if (rawItem.state !== 'active' || !population) {
                 continue;
             }
             const columns = Object.fromEntries(rawItem.column_values.map(value => [value.id, value.text || '']));
@@ -137,7 +147,7 @@ async function fetchOpenSnapItems(board) {
             const orderDate = parseMondayDate(columns[config.COL_IDS.ORDER_DATE]);
             const createdAt = parseDate(rawItem.created_at);
             const ageStart = orderDate || createdAt;
-            items.push({
+            populations[population].push({
                 id: rawItem.id,
                 name: rawItem.name,
                 url: `https://${config.MONDAY_SLUG}.monday.com/boards/${board.id}/pulses/${rawItem.id}`,
@@ -163,13 +173,102 @@ async function fetchOpenSnapItems(board) {
         cursor = page?.cursor || null;
     } while (cursor);
 
-    return items;
+    return populations;
+}
+
+async function fetchRecentShippedItems(board, currentDateKey, lookbackDays) {
+    const cutoff = dateKeyToUtc(currentDateKey);
+    cutoff.setUTCDate(cutoff.getUTCDate() - (lookbackDays - 1));
+    const end = dateKeyToUtc(currentDateKey);
+    end.setUTCDate(end.getUTCDate() + 1);
+    const from = cutoff.toISOString();
+    const to = end.toISOString();
+    const activityData = await mondayQuery(`query {
+        boards(ids: ${board.id}) {
+            activity_logs(
+                from: ${JSON.stringify(from)}
+                to: ${JSON.stringify(to)}
+                limit: 10000
+                column_ids: [${JSON.stringify(config.COL_IDS.CURRENT_STATUS)}, ${JSON.stringify(config.COL_IDS.DATE_SHIPPED)}]
+            ) { event data created_at }
+        }
+    }`);
+    const relevantGroups = new Set([config.SNAP_GROUP_ID, config.FIELD_SERVICE_GROUP_ID]);
+    const candidateIds = new Set();
+
+    for (const log of activityData.boards[0]?.activity_logs || []) {
+        let activity;
+        try { activity = JSON.parse(log.data); } catch { continue; }
+        if (!relevantGroups.has(activity.group_id)) continue;
+        const isShipDateChange = activity.column_id === config.COL_IDS.DATE_SHIPPED;
+        const isShippedStatus = activity.column_id === config.COL_IDS.CURRENT_STATUS
+            && String(activity.value?.label?.text || '').toLowerCase() === 'shipped';
+        if (isShipDateChange || isShippedStatus) {
+            if (activity.pulse_id) candidateIds.add(String(activity.pulse_id));
+            for (const id of activity.pulse_ids || []) candidateIds.add(String(id));
+        }
+    }
+
+    if (!candidateIds.size) return [];
+    const items = [];
+    const ids = [...candidateIds];
+    for (let offset = 0; offset < ids.length; offset += 100) {
+        const data = await mondayQuery(`query ($itemIds: [ID!], $columnIds: [String!]) {
+            items(ids: $itemIds) {
+                id name state created_at
+                board { id }
+                group { id title }
+                column_values(ids: $columnIds) { id text value }
+            }
+        }`, { itemIds: ids.slice(offset, offset + 100), columnIds: Object.values(config.COL_IDS) });
+        items.push(...(data.items || []));
+    }
+
+    return items.map(rawItem => mapOrderItem(rawItem, board.id))
+        .filter(item => relevantGroups.has(item.groupId)
+            && item.dateShipped
+            && item.dateShipped >= cutoff
+            && item.dateShipped < end)
+        .sort((a, b) => b.dateShipped - a.dateShipped || a.name.localeCompare(b.name));
+}
+
+function mapOrderItem(rawItem, boardId) {
+    const columns = Object.fromEntries(rawItem.column_values.map(value => [value.id, value.text || '']));
+    const orderDate = parseMondayDate(columns[config.COL_IDS.ORDER_DATE]);
+    const createdAt = parseDate(rawItem.created_at);
+    const ageStart = orderDate || createdAt;
+    return {
+        id: rawItem.id,
+        name: rawItem.name,
+        groupId: rawItem.group?.id || '',
+        groupName: rawItem.group?.title || '',
+        state: rawItem.state,
+        url: `https://${config.MONDAY_SLUG}.monday.com/boards/${boardId}/pulses/${rawItem.id}`,
+        currentStatus: columns[config.COL_IDS.CURRENT_STATUS] || 'Unassigned',
+        priority: columns[config.COL_IDS.PRIORITY] || '',
+        requestedBy: columns[config.COL_IDS.REQUESTED_BY] || '',
+        customer: columns[config.COL_IDS.CUSTOMER] || '',
+        orderDate,
+        createdAt,
+        ageDays: ageStart ? daysBetween(ageStart, new Date()) : null,
+        epicorJob: columns[config.COL_IDS.EPICOR_JOB] || '',
+        partNumber: columns[config.COL_IDS.PART_NUMBER] || '',
+        partDescription: columns[config.COL_IDS.PART_DESCRIPTION] || '',
+        quantity: columns[config.COL_IDS.QUANTITY] || '',
+        cxAlloyId: columns[config.COL_IDS.CX_ALLOY_ID] || '',
+        trackingNumber: columns[config.COL_IDS.TRACKING_NUMBER] || '',
+        dateShipped: parseMondayDate(columns[config.COL_IDS.DATE_SHIPPED]),
+        purchaseOrder: columns[config.COL_IDS.PURCHASE_ORDER] || '',
+        supplierOrderDate: parseMondayDate(columns[config.COL_IDS.SUPPLIER_ORDER_DATE]),
+        supplierTracking: columns[config.COL_IDS.SUPPLIER_TRACKING] || ''
+    };
 }
 
 function summarize(items, comparisonSnapshot) {
     const byCurrentStatus = countBy(items, item => item.currentStatus || 'Unassigned');
     const byPriority = countBy(items, item => item.priority || 'Not set');
     const byCustomer = countBy(items, item => item.customer || 'Not set');
+    const byRequestedBy = countMultiValue(items, item => item.requestedBy || 'Not set');
     const datedItems = items.filter(item => Number.isFinite(item.ageDays));
     const averageAge = datedItems.length
         ? Math.round(datedItems.reduce((sum, item) => sum + item.ageDays, 0) / datedItems.length)
@@ -191,6 +290,7 @@ function summarize(items, comparisonSnapshot) {
         byCurrentStatus,
         byPriority,
         byCustomer,
+        byRequestedBy,
         averageAge,
         agingBuckets,
         over30Days: datedItems.filter(item => item.ageDays > 30).length,
@@ -203,6 +303,22 @@ function summarize(items, comparisonSnapshot) {
     };
 }
 
+function comparisonForPopulation(comparisonSnapshot, populationKey, allowLegacy = false) {
+    if (!comparisonSnapshot) return null;
+    const populationSnapshot = comparisonSnapshot.snapshot?.[populationKey]
+        || (allowLegacy && Number.isFinite(comparisonSnapshot.snapshot?.total) ? comparisonSnapshot.snapshot : null);
+    return populationSnapshot ? { dateKey: comparisonSnapshot.dateKey, snapshot: populationSnapshot } : null;
+}
+
+function snapshotFromReport(report) {
+    return { total: report.total, byCurrentStatus: report.byCurrentStatus };
+}
+
+function logPopulationSummary(label, report) {
+    console.log(`${label} open orders: ${report.total}; average age: ${report.averageAge ?? 'n/a'} days; over 30 days: ${report.over30Days}.`);
+    console.log(`${label} Current Dept / Status: ${Object.entries(report.byCurrentStatus).sort((a, b) => b[1] - a[1]).map(([status, count]) => `${status}=${count}`).join(', ')}`);
+}
+
 function attentionSort(a, b) {
     const priorityRank = item => /critical/i.test(item.priority) ? 0 : /high/i.test(item.priority) ? 1 : 2;
     return priorityRank(a) - priorityRank(b)
@@ -210,38 +326,26 @@ function attentionSort(a, b) {
         || a.name.localeCompare(b.name);
 }
 
-function generateHtml(report, history, dateKey) {
+function generateHtml(report, fieldReport, recentShipped, history, dateKey) {
     const viewUrl = `https://${config.MONDAY_SLUG}.monday.com/boards/${config.BOARD_ID}/views/${config.VIEW_ID}`;
+    const fieldViewUrl = `https://${config.MONDAY_SLUG}.monday.com/boards/${config.BOARD_ID}/views/${config.FIELD_SERVICE_VIEW_ID}`;
     const generatedLabel = new Intl.DateTimeFormat('en-US', {
         timeZone: config.TIME_ZONE, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
     }).format(new Date());
-    const sortedStatuses = Object.entries(report.byCurrentStatus).sort((a, b) => b[1] - a[1]);
-    const maxStatusCount = Math.max(1, ...sortedStatuses.map(([, count]) => count));
-    const statusRows = sortedStatuses.map(([status, count]) => {
-        const prior = report.comparisonSnapshot?.snapshot.byCurrentStatus?.[status] || 0;
-        const delta = report.comparisonSnapshot ? count - prior : null;
-        return `<tr>
-            <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;font-weight:700;color:#0f172a;">${escapeHtml(status)}</td>
-            <td width="45%" style="padding:10px 12px;border-bottom:1px solid #e2e8f0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td width="${Math.max(3, Math.round(count / maxStatusCount * 100))}%" height="9" bgcolor="#2563eb" style="background:#2563eb;border-radius:4px;"></td><td></td></tr></table></td>
-            <td align="right" style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;font-weight:800;color:#0f172a;">${count}</td>
-            <td align="right" style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:12px;font-weight:700;color:${deltaColor(delta)};">${formatDelta(delta)}</td>
-        </tr>`;
-    }).join('');
+    const statusRows = renderStatusRows(report, '#2563eb');
+    const fieldStatusRows = renderStatusRows(fieldReport, '#0f766e');
 
     const agingRows = Object.entries(report.agingBuckets).map(([label, count]) => tableCountRow(label, count, report.total)).join('');
     const priorityRows = Object.entries(report.byPriority).sort((a, b) => b[1] - a[1]).map(([label, count]) => tableCountRow(label, count, report.total)).join('');
     const customerRows = Object.entries(report.byCustomer).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([label, count]) => tableCountRow(label, count, report.total)).join('');
-    const trendRows = Object.entries(history).sort(([a], [b]) => b.localeCompare(a)).slice(0, 14).reverse().map(([day, snapshot]) => {
-        const topStage = Object.entries(snapshot.byCurrentStatus || {}).sort((a, b) => b[1] - a[1])[0];
-        return `<tr><td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#475569;">${escapeHtml(formatDateKey(day))}</td><td align="right" style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;font-weight:800;">${snapshot.total}</td><td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#475569;">${topStage ? `${escapeHtml(topStage[0])} (${topStage[1]})` : '—'}</td></tr>`;
-    }).join('');
-    const itemRows = report.attentionItems.map(item => `<tr>
-        <td style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;"><a href="${item.url}" style="color:#1d4ed8;text-decoration:none;font-weight:700;">${escapeHtml(item.name)}</a>${item.partNumber ? `<br><span style="color:#64748b;">Part ${escapeHtml(item.partNumber)}</span>` : ''}</td>
-        <td style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#334155;">${escapeHtml(item.currentStatus)}</td>
-        <td style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#334155;">${escapeHtml(item.priority || '—')}</td>
-        <td style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#334155;">${escapeHtml(item.customer || '—')}</td>
-        <td align="right" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;font-weight:700;color:${ageColor(item.ageDays)};">${item.ageDays === null ? '—' : item.ageDays}</td>
-    </tr>`).join('');
+    const trendRows = renderTrendRows(history, 'factorySnap', true);
+    const fieldTrendRows = renderTrendRows(history, 'fieldService');
+    const itemRows = renderAttentionRows(report.attentionItems);
+    const fieldItemRows = renderAttentionRows(fieldReport.attentionItems);
+    const fieldAgingRows = Object.entries(fieldReport.agingBuckets).map(([label, count]) => tableCountRow(label, count, fieldReport.total)).join('');
+    const fieldRequestorRows = Object.entries(fieldReport.byRequestedBy).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([label, count]) => tableCountRow(label, count, fieldReport.total)).join('');
+    const fieldCustomerRows = Object.entries(fieldReport.byCustomer).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([label, count]) => tableCountRow(label, count, fieldReport.total)).join('');
+    const recentlyShippedRows = renderRecentlyShippedRows(recentShipped);
     const comparisonLabel = report.comparisonSnapshot
         ? `vs. ${formatDateKey(report.comparisonSnapshot.dateKey)}`
         : 'trend baseline starts today';
@@ -252,9 +356,10 @@ function generateHtml(report, history, dateKey) {
     <table role="presentation" width="760" cellpadding="0" cellspacing="0" style="width:760px;max-width:100%;background:#ffffff;">
         <tr><td bgcolor="#172554" style="padding:28px 32px;background:#172554;color:#ffffff;">
             <div style="font-size:11px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;color:#bfdbfe;">Order Tracker Operations</div>
-            <h1 style="margin:7px 0 5px;font-size:28px;line-height:34px;">Open SNAP Orders</h1>
+            <h1 style="margin:7px 0 5px;font-size:28px;line-height:34px;">Open Parts Orders</h1>
             <div style="font-size:13px;color:#dbeafe;">${escapeHtml(generatedLabel)} &nbsp;•&nbsp; Grouped by Current Dept / Status</div>
         </td></tr>
+        ${sectionHeader('Factory SNAP / PIRF orders', 'Factory-originated orders prepared for approval')}
         <tr><td style="padding:22px 24px 8px;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
                 ${metricCard('Open orders', report.total, formatDelta(report.totalDelta), '#1d4ed8')}
@@ -276,8 +381,62 @@ function generateHtml(report, history, dateKey) {
         <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Date</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Open</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Largest stage</th></tr>${trendRows}</table></td></tr>
         ${sectionHeader('Attention queue', `Critical/high priority first, then oldest ${config.ATTENTION_ITEM_LIMIT} orders`)}
         <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Current dept / status</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Priority</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Customer</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Age</th></tr>${itemRows}</table></td></tr>
-        <tr><td bgcolor="#e0e7ff" align="center" style="padding:20px;background:#e0e7ff;"><a href="${viewUrl}" style="display:inline-block;background:#1d4ed8;color:#ffffff;text-decoration:none;font-size:13px;font-weight:800;padding:11px 20px;border-radius:4px;">Open the Monday view</a><div style="margin-top:12px;font-size:11px;color:#475569;">Automated daily at 5:00 AM Central &nbsp;•&nbsp; Only “Shipped” items are treated as complete</div></td></tr>
+        <tr><td bgcolor="#ccfbf1" style="padding:18px 24px;background:#ccfbf1;border-top:5px solid #0f766e;"><div style="font-size:20px;font-weight:800;color:#134e4a;">Field-issued orders</div><div style="font-size:12px;color:#115e59;margin-top:4px;">All orders in the Field Service Orders group, including S#, W#, Sales Order, and other order types</div></td></tr>
+        <tr><td style="padding:22px 24px 8px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+            ${metricCard('Open field orders', fieldReport.total, formatDelta(fieldReport.totalDelta), '#0f766e')}
+            ${metricCard('Average age', fieldReport.averageAge === null ? '—' : `${fieldReport.averageAge}d`, `${fieldReport.over30Days} over 30d`, '#0f766e')}
+            ${metricCard('New in 7 days', fieldReport.newLast7Days, 'by order date', '#7c3aed')}
+            ${metricCard('High / critical', fieldReport.priorityAttention, `${fieldReport.dataGaps} data gaps`, '#b45309')}
+        </tr></table></td></tr>
+        ${sectionHeader('Field Current Dept / Status', 'Current field-issued workload and seven-day change')}
+        <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:9px 12px;font-size:11px;color:#64748b;">Department / stage</th><th></th><th align="right" style="padding:9px 12px;font-size:11px;color:#64748b;">Open</th><th align="right" style="padding:9px 12px;font-size:11px;color:#64748b;">7-day Δ</th></tr>${fieldStatusRows}</table></td></tr>
+        ${sectionHeader('Field operational profile', 'Aging, originating requestors, and customer concentration')}
+        <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td width="32%" valign="top">${miniTable('Aging', fieldAgingRows)}</td><td width="2%"></td><td width="32%" valign="top">${miniTable('Requested by', fieldRequestorRows)}</td><td width="2%"></td><td width="32%" valign="top">${miniTable('Top customers', fieldCustomerRows)}</td></tr></table></td></tr>
+        ${sectionHeader('Field daily trend', 'Separate snapshot history for field-issued orders')}
+        <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Date</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Open</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Largest stage</th></tr>${fieldTrendRows}</table></td></tr>
+        ${sectionHeader('Field attention queue', `All order types included; critical/high priority first, then oldest ${config.ATTENTION_ITEM_LIMIT}`)}
+        <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Current dept / status</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Priority</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Customer</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Age</th></tr>${fieldItemRows}</table></td></tr>
+        ${sectionHeader('Shipped in the last 7 days', `${recentShipped.length} completed Factory or Field order${recentShipped.length === 1 ? '' : 's'}`)}
+        <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f0fdf4"><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Source</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Customer</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Tracking</th><th align="right" style="padding:8px 10px;font-size:11px;color:#166534;">Date shipped</th></tr>${recentlyShippedRows}</table></td></tr>
+        <tr><td bgcolor="#e0e7ff" align="center" style="padding:20px;background:#e0e7ff;"><a href="${viewUrl}" style="display:inline-block;background:#1d4ed8;color:#ffffff;text-decoration:none;font-size:13px;font-weight:800;padding:11px 16px;border-radius:4px;margin-right:6px;">Open Factory SNAP view</a><a href="${fieldViewUrl}" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;font-size:13px;font-weight:800;padding:11px 16px;border-radius:4px;">Open Field Service view</a><div style="margin-top:12px;font-size:11px;color:#475569;">Automated daily at 5:00 AM Central &nbsp;•&nbsp; Only “Shipped” items are treated as complete</div></td></tr>
     </table></td></tr></table></body></html>`;
+}
+
+function renderStatusRows(report, barColor) {
+    const sorted = Object.entries(report.byCurrentStatus).sort((a, b) => b[1] - a[1]);
+    const maximum = Math.max(1, ...sorted.map(([, count]) => count));
+    return sorted.map(([status, count]) => {
+        const prior = report.comparisonSnapshot?.snapshot.byCurrentStatus?.[status] || 0;
+        const delta = report.comparisonSnapshot ? count - prior : null;
+        return `<tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;font-weight:700;color:#0f172a;">${escapeHtml(status)}</td><td width="45%" style="padding:10px 12px;border-bottom:1px solid #e2e8f0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td width="${Math.max(3, Math.round(count / maximum * 100))}%" height="9" bgcolor="${barColor}" style="background:${barColor};border-radius:4px;"></td><td></td></tr></table></td><td align="right" style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;font-weight:800;color:#0f172a;">${count}</td><td align="right" style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:12px;font-weight:700;color:${deltaColor(delta)};">${formatDelta(delta)}</td></tr>`;
+    }).join('');
+}
+
+function renderTrendRows(history, populationKey, allowLegacy = false) {
+    return Object.entries(history).sort(([a], [b]) => b.localeCompare(a)).slice(0, 14).reverse().map(([day, stored]) => {
+        const snapshot = stored?.[populationKey] || (allowLegacy && Number.isFinite(stored?.total) ? stored : null);
+        if (!snapshot) return '';
+        const topStage = Object.entries(snapshot.byCurrentStatus || {}).sort((a, b) => b[1] - a[1])[0];
+        return `<tr><td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#475569;">${escapeHtml(formatDateKey(day))}</td><td align="right" style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;font-weight:800;">${snapshot.total}</td><td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#475569;">${topStage ? `${escapeHtml(topStage[0])} (${topStage[1]})` : '—'}</td></tr>`;
+    }).join('');
+}
+
+function renderAttentionRows(items) {
+    return items.map(item => `<tr><td style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;"><a href="${item.url}" style="color:#1d4ed8;text-decoration:none;font-weight:700;">${escapeHtml(item.name)}</a>${item.partNumber ? `<br><span style="color:#64748b;">Part ${escapeHtml(item.partNumber)}</span>` : ''}</td><td style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#334155;">${escapeHtml(item.currentStatus)}</td><td style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#334155;">${escapeHtml(item.priority || '—')}</td><td style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#334155;">${escapeHtml(item.customer || '—')}</td><td align="right" style="padding:9px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;font-weight:700;color:${ageColor(item.ageDays)};">${item.ageDays === null ? '—' : item.ageDays}</td></tr>`).join('');
+}
+
+function renderRecentlyShippedRows(items) {
+    if (!items.length) {
+        return '<tr><td colspan="5" align="center" style="padding:16px;color:#64748b;font-size:12px;">No shipments recorded in the last 7 days.</td></tr>';
+    }
+    return items.map(item => {
+        const source = item.groupId === config.FIELD_SERVICE_GROUP_ID ? 'Field-issued' : 'Factory SNAP/PIRF';
+        const tracking = item.trackingNumber || item.supplierTracking || '—';
+        const orderLabel = item.state === 'active'
+            ? `<a href="${item.url}" style="color:#166534;text-decoration:none;font-weight:700;">${escapeHtml(item.name)}</a>`
+            : `<span style="color:#166534;font-weight:700;">${escapeHtml(item.name)}</span>`;
+        return `<tr><td style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;">${orderLabel}${item.partNumber ? `<br><span style="color:#64748b;">Part ${escapeHtml(item.partNumber)}</span>` : ''}</td><td style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;color:#334155;">${escapeHtml(source)}</td><td style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;color:#334155;">${escapeHtml(item.customer || '—')}</td><td style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;color:#334155;">${escapeHtml(tracking)}</td><td align="right" style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;font-weight:700;color:#166534;">${escapeHtml(formatDate(item.dateShipped))}</td></tr>`;
+    }).join('');
 }
 
 function metricCard(label, value, note, color) {
@@ -379,7 +538,7 @@ async function sendEmail(html, dateKey) {
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
             message: {
-                subject: `Open SNAP Orders Daily Report - ${formatDateKey(dateKey)}`,
+                subject: `Open Factory SNAP & Field-Issued Orders - ${formatDateKey(dateKey)}`,
                 body: { contentType: 'HTML', content: html },
                 toRecipients: recipients.map(address => ({ emailAddress: { address } }))
             },
@@ -416,6 +575,16 @@ function countBy(items, selector) {
     }, {});
 }
 
+function countMultiValue(items, selector) {
+    const counts = {};
+    for (const item of items) {
+        for (const value of String(selector(item)).split(',').map(entry => entry.trim()).filter(Boolean)) {
+            counts[value] = (counts[value] || 0) + 1;
+        }
+    }
+    return counts;
+}
+
 function parseMondayDate(value) {
     if (!value) return null;
     const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -439,6 +608,11 @@ function dateKeyToUtc(dateKey) {
 function formatDateKey(dateKey) {
     const [year, month, day] = dateKey.split('-');
     return `${Number(month)}/${Number(day)}/${year}`;
+}
+
+function formatDate(date) {
+    if (!date) return '';
+    return `${date.getUTCMonth() + 1}/${date.getUTCDate()}/${date.getUTCFullYear()}`;
 }
 
 function formatDelta(value) {
