@@ -1,23 +1,31 @@
 # Open SNAP Orders daily report
 
-This report reads the **Order Tracker** board and links to the **Open SNAP Orders**
-table view:
+This report reads the **Order Tracker** board and covers both factory-originated
+SNAP/PIRF orders and field-issued orders:
 
 - Board: `18414349860`
 - View: `269601110`
 - SNAP group: `group_title`
+- Field Service group: `topics`
+- Field Service view: `263347143`
 - Schedule: 5:00 AM `America/Chicago` every day
 - Initial recipient: `efowler@psiengines.com`
 
 ## Report logic
 
-An item is included when it is active, belongs to the SNAPs group, and its
-**Current Dept / Status** is not `Shipped`. `Shipped to Darien` remains open
-because it is an active internal workflow stage on the board.
+An item is included when it is active, belongs to either the SNAPs or Field
+Service Orders group, and its **Current Dept / Status** is not `Shipped`.
+`Shipped to Darien` remains open because it is an active internal workflow
+stage on the board. All Field Service order-name formats are included; `S#`,
+`W#`, and Sales Order names are types, not report filters.
 
-Daily snapshots retain the total backlog and counts by **Current Dept / Status**.
-The email includes headline metrics, seven-day stage changes, aging, priorities,
-top customers, recent snapshots, and an attention queue.
+Daily snapshots separately retain Factory SNAP/PIRF and Field Service totals and
+counts by **Current Dept / Status**. Each population has its own headline
+metrics, seven-day stage changes, aging, recent snapshots, and attention queue.
+The report also recovers completed records from Monday's board activity history
+and lists Factory and Field orders whose **Date Shipped** falls within the last
+seven calendar days. This remains accurate when a completed item has been
+deleted from the active table.
 
 ## Commands
 
