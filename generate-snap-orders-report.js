@@ -44,18 +44,22 @@ async function generateReport() {
         const previousSnapshot = findComparisonSnapshot(history, central.dateKey, config.TREND_COMPARISON_DAYS);
         const factoryReport = summarize(populations.factorySnap, comparisonForPopulation(previousSnapshot, 'factorySnap', true));
         const fieldServiceReport = summarize(populations.fieldService, comparisonForPopulation(previousSnapshot, 'fieldService'));
+        const otherItems = [...populations.orderDrafts, ...populations.missingFactoryRequests];
+        const otherReport = summarize(otherItems, comparisonForPopulation(previousSnapshot, 'otherBoardGroups'));
         logPopulationSummary('Factory SNAP/PIRF', factoryReport);
         logPopulationSummary('Field-issued', fieldServiceReport);
+        logPopulationSummary('Drafts and missing-part requests', otherReport);
         console.log(`Recently shipped in the last 7 days: ${recentShipped.length}.`);
 
         history[central.dateKey] = {
             factorySnap: snapshotFromReport(factoryReport),
-            fieldService: snapshotFromReport(fieldServiceReport)
+            fieldService: snapshotFromReport(fieldServiceReport),
+            otherBoardGroups: snapshotFromReport(otherReport)
         };
         pruneHistory(history, config.HISTORY_RETENTION_DAYS, central.dateKey);
         await runtimeStore.writeHistory(history);
 
-        const html = generateHtml(factoryReport, fieldServiceReport, recentShipped, history, central.dateKey);
+        const html = generateHtml(factoryReport, fieldServiceReport, otherReport, recentShipped, history, central.dateKey);
         const outputPath = saveHtml(html, central.dateKey);
         console.log(`HTML preview saved: ${outputPath}`);
 
@@ -110,10 +114,12 @@ async function fetchBoard() {
 }
 
 async function fetchOpenOrderItems(board) {
-    const populations = { factorySnap: [], fieldService: [] };
+    const populations = { factorySnap: [], fieldService: [], orderDrafts: [], missingFactoryRequests: [] };
     const populationByGroup = {
         [config.SNAP_GROUP_ID]: 'factorySnap',
-        [config.FIELD_SERVICE_GROUP_ID]: 'fieldService'
+        [config.FIELD_SERVICE_GROUP_ID]: 'fieldService',
+        [config.DRAFT_GROUP_ID]: 'orderDrafts',
+        [config.MISSING_FACTORY_GROUP_ID]: 'missingFactoryRequests'
     };
     const columnIds = Object.values(config.COL_IDS);
     let cursor = null;
@@ -138,37 +144,12 @@ async function fetchOpenOrderItems(board) {
             if (rawItem.state !== 'active' || !population) {
                 continue;
             }
-            const columns = Object.fromEntries(rawItem.column_values.map(value => [value.id, value.text || '']));
-            const currentStatus = columns[config.COL_IDS.CURRENT_STATUS] || 'Unassigned';
+            const item = mapOrderItem(rawItem, board.id);
+            const currentStatus = item.currentStatus;
             if (config.CLOSED_CURRENT_STATUSES.some(status => status.toLowerCase() === currentStatus.toLowerCase())) {
                 continue;
             }
-
-            const orderDate = parseMondayDate(columns[config.COL_IDS.ORDER_DATE]);
-            const createdAt = parseDate(rawItem.created_at);
-            const ageStart = orderDate || createdAt;
-            populations[population].push({
-                id: rawItem.id,
-                name: rawItem.name,
-                url: `https://${config.MONDAY_SLUG}.monday.com/boards/${board.id}/pulses/${rawItem.id}`,
-                currentStatus,
-                priority: columns[config.COL_IDS.PRIORITY] || '',
-                requestedBy: columns[config.COL_IDS.REQUESTED_BY] || '',
-                customer: columns[config.COL_IDS.CUSTOMER] || '',
-                orderDate,
-                createdAt,
-                ageDays: ageStart ? daysBetween(ageStart, new Date()) : null,
-                epicorJob: columns[config.COL_IDS.EPICOR_JOB] || '',
-                partNumber: columns[config.COL_IDS.PART_NUMBER] || '',
-                partDescription: columns[config.COL_IDS.PART_DESCRIPTION] || '',
-                quantity: columns[config.COL_IDS.QUANTITY] || '',
-                cxAlloyId: columns[config.COL_IDS.CX_ALLOY_ID] || '',
-                trackingNumber: columns[config.COL_IDS.TRACKING_NUMBER] || '',
-                dateShipped: parseMondayDate(columns[config.COL_IDS.DATE_SHIPPED]),
-                purchaseOrder: columns[config.COL_IDS.PURCHASE_ORDER] || '',
-                supplierOrderDate: parseMondayDate(columns[config.COL_IDS.SUPPLIER_ORDER_DATE]),
-                supplierTracking: columns[config.COL_IDS.SUPPLIER_TRACKING] || ''
-            });
+            populations[population].push(item);
         }
         cursor = page?.cursor || null;
     } while (cursor);
@@ -178,8 +159,10 @@ async function fetchOpenOrderItems(board) {
 
 async function fetchRecentShippedItems(board, currentDateKey, lookbackDays) {
     const cutoff = dateKeyToUtc(currentDateKey);
+    cutoff.setUTCHours(0, 0, 0, 0);
     cutoff.setUTCDate(cutoff.getUTCDate() - (lookbackDays - 1));
     const end = dateKeyToUtc(currentDateKey);
+    end.setUTCHours(0, 0, 0, 0);
     end.setUTCDate(end.getUTCDate() + 1);
     const from = cutoff.toISOString();
     const to = end.toISOString();
@@ -189,29 +172,34 @@ async function fetchRecentShippedItems(board, currentDateKey, lookbackDays) {
                 from: ${JSON.stringify(from)}
                 to: ${JSON.stringify(to)}
                 limit: 10000
-                column_ids: [${JSON.stringify(config.COL_IDS.CURRENT_STATUS)}, ${JSON.stringify(config.COL_IDS.DATE_SHIPPED)}]
+                column_ids: [${JSON.stringify(config.COL_IDS.CURRENT_STATUS)}]
             ) { event data created_at }
         }
     }`);
-    const relevantGroups = new Set([config.SNAP_GROUP_ID, config.FIELD_SERVICE_GROUP_ID]);
-    const candidateIds = new Set();
+    const relevantGroups = new Set([
+        config.SNAP_GROUP_ID,
+        config.FIELD_SERVICE_GROUP_ID,
+        config.DRAFT_GROUP_ID,
+        config.MISSING_FACTORY_GROUP_ID
+    ]);
+    const shippedEvents = new Map();
 
     for (const log of activityData.boards[0]?.activity_logs || []) {
         let activity;
         try { activity = JSON.parse(log.data); } catch { continue; }
         if (!relevantGroups.has(activity.group_id)) continue;
-        const isShipDateChange = activity.column_id === config.COL_IDS.DATE_SHIPPED;
         const isShippedStatus = activity.column_id === config.COL_IDS.CURRENT_STATUS
             && String(activity.value?.label?.text || '').toLowerCase() === 'shipped';
-        if (isShipDateChange || isShippedStatus) {
-            if (activity.pulse_id) candidateIds.add(String(activity.pulse_id));
-            for (const id of activity.pulse_ids || []) candidateIds.add(String(id));
+        if (isShippedStatus) {
+            const completedAt = parseActivityTimestamp(log.created_at);
+            if (activity.pulse_id) recordLatestEvent(shippedEvents, String(activity.pulse_id), completedAt);
+            for (const id of activity.pulse_ids || []) recordLatestEvent(shippedEvents, String(id), completedAt);
         }
     }
 
-    if (!candidateIds.size) return [];
+    if (!shippedEvents.size) return [];
     const items = [];
-    const ids = [...candidateIds];
+    const ids = [...shippedEvents.keys()];
     for (let offset = 0; offset < ids.length; offset += 100) {
         const data = await mondayQuery(`query ($itemIds: [ID!], $columnIds: [String!]) {
             items(ids: $itemIds) {
@@ -224,12 +212,25 @@ async function fetchRecentShippedItems(board, currentDateKey, lookbackDays) {
         items.push(...(data.items || []));
     }
 
-    return items.map(rawItem => mapOrderItem(rawItem, board.id))
-        .filter(item => relevantGroups.has(item.groupId)
-            && item.dateShipped
-            && item.dateShipped >= cutoff
-            && item.dateShipped < end)
-        .sort((a, b) => b.dateShipped - a.dateShipped || a.name.localeCompare(b.name));
+    return items.map(rawItem => ({
+        ...mapOrderItem(rawItem, board.id),
+        completedAt: shippedEvents.get(String(rawItem.id))
+    }))
+        .filter(item => relevantGroups.has(item.groupId) && item.completedAt)
+        .sort((a, b) => b.completedAt - a.completedAt || a.name.localeCompare(b.name));
+}
+
+function recordLatestEvent(events, itemId, eventDate) {
+    if (!eventDate) return;
+    const existing = events.get(itemId);
+    if (!existing || eventDate > existing) events.set(itemId, eventDate);
+}
+
+function parseActivityTimestamp(value) {
+    const timestamp = Number(value);
+    if (!Number.isFinite(timestamp)) return null;
+    const date = new Date(Math.round(timestamp / 10000));
+    return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function mapOrderItem(rawItem, boardId) {
@@ -326,7 +327,7 @@ function attentionSort(a, b) {
         || a.name.localeCompare(b.name);
 }
 
-function generateHtml(report, fieldReport, recentShipped, history, dateKey) {
+function generateHtml(report, fieldReport, otherReport, recentShipped, history, dateKey) {
     const viewUrl = `https://${config.MONDAY_SLUG}.monday.com/boards/${config.BOARD_ID}/views/${config.VIEW_ID}`;
     const fieldViewUrl = `https://${config.MONDAY_SLUG}.monday.com/boards/${config.BOARD_ID}/views/${config.FIELD_SERVICE_VIEW_ID}`;
     const generatedLabel = new Intl.DateTimeFormat('en-US', {
@@ -359,12 +360,12 @@ function generateHtml(report, fieldReport, recentShipped, history, dateKey) {
             <h1 style="margin:7px 0 5px;font-size:28px;line-height:34px;">Open Parts Orders</h1>
             <div style="font-size:13px;color:#dbeafe;">${escapeHtml(generatedLabel)} &nbsp;•&nbsp; Grouped by Current Dept / Status</div>
         </td></tr>
-        ${sectionHeader('At a glance', 'Factory and Field workloads shown together')}
+        ${sectionHeader('At a glance', 'All active Order Tracker groups')}
         <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+            ${metricCard('Active board lines', report.total + fieldReport.total + otherReport.total, 'All Order Tracker groups', '#172554')}
             ${metricCard('Factory open', report.total, formatDelta(report.totalDelta), '#1d4ed8')}
             ${metricCard('Field open', fieldReport.total, formatDelta(fieldReport.totalDelta), '#0f766e')}
-            ${metricCard('Over 30 days', report.over30Days + fieldReport.over30Days, `${report.over30Days} Factory • ${fieldReport.over30Days} Field`, '#b45309')}
-            ${metricCard('Shipped in 7 days', recentShipped.length, 'Factory and Field', '#15803d')}
+            ${metricCard('Draft / other intake', otherReport.total, 'Drafts + missing-part requests', '#b45309')}
         </tr></table></td></tr>
         ${sectionHeader('Factory SNAP / PIRF orders', 'Factory-originated orders prepared for approval')}
         <tr><td style="padding:22px 24px 8px;">
@@ -386,8 +387,8 @@ function generateHtml(report, fieldReport, recentShipped, history, dateKey) {
         </tr></table></td></tr>
         ${sectionHeader('Daily trend', 'Snapshot history builds automatically each morning')}
         <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Date</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Open</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Largest stage</th></tr>${trendRows}</table></td></tr>
-        ${sectionHeader('Shipped in the last 7 days', `${recentShipped.length} completed Factory or Field order${recentShipped.length === 1 ? '' : 's'}`)}
-        <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #bbf7d0;"><tr bgcolor="#f0fdf4"><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Source</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Customer</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Tracking</th><th align="right" style="padding:8px 10px;font-size:11px;color:#166534;">Date shipped</th></tr>${recentlyShippedRows}</table></td></tr>
+        ${sectionHeader('Shipped in the last 7 days', `${recentShipped.length} line${recentShipped.length === 1 ? '' : 's'} changed to Shipped`)}
+        <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #bbf7d0;"><tr bgcolor="#f0fdf4"><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Source</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Customer</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Tracking</th><th align="right" style="padding:8px 10px;font-size:11px;color:#166534;">Marked shipped</th></tr>${recentlyShippedRows}</table></td></tr>
         ${sectionHeader('Attention queue', `Critical/high priority first, then oldest ${config.ATTENTION_ITEM_LIMIT} orders`)}
         <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Current dept / status</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Priority</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Customer</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Age</th></tr>${itemRows}</table></td></tr>
         <tr><td bgcolor="#ccfbf1" style="padding:18px 24px;background:#ccfbf1;border-top:5px solid #0f766e;"><div style="font-size:20px;font-weight:800;color:#134e4a;">Field-issued orders</div><div style="font-size:12px;color:#115e59;margin-top:4px;">All orders in the Field Service Orders group, including S#, W#, Sales Order, and other order types</div></td></tr>
@@ -437,13 +438,21 @@ function renderRecentlyShippedRows(items) {
         return '<tr><td colspan="5" align="center" style="padding:16px;color:#64748b;font-size:12px;">No shipments recorded in the last 7 days.</td></tr>';
     }
     return items.map(item => {
-        const source = item.groupId === config.FIELD_SERVICE_GROUP_ID ? 'Field-issued' : 'Factory SNAP/PIRF';
+        const source = groupDisplayName(item.groupId);
         const tracking = item.trackingNumber || item.supplierTracking || '—';
         const orderLabel = item.state === 'active'
             ? `<a href="${item.url}" style="color:#166534;text-decoration:none;font-weight:700;">${escapeHtml(item.name)}</a>`
             : `<span style="color:#166534;font-weight:700;">${escapeHtml(item.name)}</span>`;
-        return `<tr><td style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;">${orderLabel}${item.partNumber ? `<br><span style="color:#64748b;">Part ${escapeHtml(item.partNumber)}</span>` : ''}</td><td style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;color:#334155;">${escapeHtml(source)}</td><td style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;color:#334155;">${escapeHtml(item.customer || '—')}</td><td style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;color:#334155;">${escapeHtml(tracking)}</td><td align="right" style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;font-weight:700;color:#166534;">${escapeHtml(formatDate(item.dateShipped))}</td></tr>`;
+        return `<tr><td style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;">${orderLabel}${item.partNumber ? `<br><span style="color:#64748b;">Part ${escapeHtml(item.partNumber)}</span>` : ''}</td><td style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;color:#334155;">${escapeHtml(source)}</td><td style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;color:#334155;">${escapeHtml(item.customer || '—')}</td><td style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;color:#334155;">${escapeHtml(tracking)}</td><td align="right" style="padding:9px 10px;border-bottom:1px solid #dcfce7;font-size:12px;font-weight:700;color:#166534;">${escapeHtml(formatDate(item.completedAt))}</td></tr>`;
     }).join('');
+}
+
+function groupDisplayName(groupId) {
+    if (groupId === config.FIELD_SERVICE_GROUP_ID) return 'Field-issued';
+    if (groupId === config.SNAP_GROUP_ID) return 'Factory SNAP/PIRF';
+    if (groupId === config.MISSING_FACTORY_GROUP_ID) return 'Missing Part Factory';
+    if (groupId === config.DRAFT_GROUP_ID) return 'Order Draft';
+    return 'Other';
 }
 
 function metricCard(label, value, note, color) {
