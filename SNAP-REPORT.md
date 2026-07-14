@@ -13,8 +13,10 @@ SNAP/PIRF orders and field-issued orders:
 
 ## Report logic
 
-An item is included when it is active, belongs to either the SNAPs or Field
-Service Orders group, and its **Current Dept / Status** is not `Shipped`.
+The whole-board overview counts active lines from all four main-table groups.
+Detailed operational sections cover SNAPs and Field Service Orders, while Drafts
+and Missing Part Factory Requests remain separately visible as intake. An item
+is open when its **Current Dept / Status** is not `Shipped`.
 `Shipped to Darien` remains open because it is an active internal workflow
 stage on the board. All Field Service order-name formats are included; `S#`,
 `W#`, and Sales Order names are types, not report filters.
@@ -22,10 +24,12 @@ stage on the board. All Field Service order-name formats are included; `S#`,
 Daily snapshots separately retain Factory SNAP/PIRF and Field Service totals and
 counts by **Current Dept / Status**. Each population has its own headline
 metrics, seven-day stage changes, aging, recent snapshots, and attention queue.
-The report also recovers completed records from Monday's board activity history
-and lists Factory and Field orders whose **Date Shipped** falls within the last
-seven calendar days. This remains accurate when a completed item has been
-deleted from the active table.
+The report also recovers completed records from Monday's board activity history.
+An item appears in the recent-shipment table only when **Current Dept / Status**
+changed to `Shipped` in the last seven calendar days. **Date Shipped** and
+tracking values are supporting details only because they can represent a partial
+shipment. This remains accurate when a completed item has been deleted from the
+active table.
 
 ## Commands
 
