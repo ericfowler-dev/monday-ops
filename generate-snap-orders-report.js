@@ -353,14 +353,19 @@ function generateHtml(report, fieldReport, recentShipped, history, dateKey) {
     return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head>
     <body style="margin:0;padding:0;background:#f1f5f9;font-family:Segoe UI,Arial,sans-serif;color:#0f172a;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#f1f5f9"><tr><td align="center" style="padding:24px 10px;">
-    <table role="presentation" width="760" cellpadding="0" cellspacing="0" style="width:760px;max-width:100%;background:#ffffff;">
+    <table role="presentation" width="960" cellpadding="0" cellspacing="0" style="width:960px;max-width:100%;background:#ffffff;">
         <tr><td bgcolor="#172554" style="padding:28px 32px;background:#172554;color:#ffffff;">
             <div style="font-size:11px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;color:#bfdbfe;">Order Tracker Operations</div>
             <h1 style="margin:7px 0 5px;font-size:28px;line-height:34px;">Open Parts Orders</h1>
             <div style="font-size:13px;color:#dbeafe;">${escapeHtml(generatedLabel)} &nbsp;•&nbsp; Grouped by Current Dept / Status</div>
         </td></tr>
-        ${sectionHeader('Shipped in the last 7 days', `${recentShipped.length} completed Factory or Field order${recentShipped.length === 1 ? '' : 's'}`)}
-        <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #bbf7d0;"><tr bgcolor="#f0fdf4"><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Source</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Customer</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Tracking</th><th align="right" style="padding:8px 10px;font-size:11px;color:#166534;">Date shipped</th></tr>${recentlyShippedRows}</table></td></tr>
+        ${sectionHeader('At a glance', 'Factory and Field workloads shown together')}
+        <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+            ${metricCard('Factory open', report.total, formatDelta(report.totalDelta), '#1d4ed8')}
+            ${metricCard('Field open', fieldReport.total, formatDelta(fieldReport.totalDelta), '#0f766e')}
+            ${metricCard('Over 30 days', report.over30Days + fieldReport.over30Days, `${report.over30Days} Factory • ${fieldReport.over30Days} Field`, '#b45309')}
+            ${metricCard('Shipped in 7 days', recentShipped.length, 'Factory and Field', '#15803d')}
+        </tr></table></td></tr>
         ${sectionHeader('Factory SNAP / PIRF orders', 'Factory-originated orders prepared for approval')}
         <tr><td style="padding:22px 24px 8px;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
@@ -381,6 +386,8 @@ function generateHtml(report, fieldReport, recentShipped, history, dateKey) {
         </tr></table></td></tr>
         ${sectionHeader('Daily trend', 'Snapshot history builds automatically each morning')}
         <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Date</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Open</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Largest stage</th></tr>${trendRows}</table></td></tr>
+        ${sectionHeader('Shipped in the last 7 days', `${recentShipped.length} completed Factory or Field order${recentShipped.length === 1 ? '' : 's'}`)}
+        <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #bbf7d0;"><tr bgcolor="#f0fdf4"><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Source</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Customer</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Tracking</th><th align="right" style="padding:8px 10px;font-size:11px;color:#166534;">Date shipped</th></tr>${recentlyShippedRows}</table></td></tr>
         ${sectionHeader('Attention queue', `Critical/high priority first, then oldest ${config.ATTENTION_ITEM_LIMIT} orders`)}
         <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Current dept / status</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Priority</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Customer</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Age</th></tr>${itemRows}</table></td></tr>
         <tr><td bgcolor="#ccfbf1" style="padding:18px 24px;background:#ccfbf1;border-top:5px solid #0f766e;"><div style="font-size:20px;font-weight:800;color:#134e4a;">Field-issued orders</div><div style="font-size:12px;color:#115e59;margin-top:4px;">All orders in the Field Service Orders group, including S#, W#, Sales Order, and other order types</div></td></tr>
