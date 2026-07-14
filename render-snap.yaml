@@ -1,0 +1,27 @@
+services:
+  - type: cron
+    name: snap-orders-daily-report
+    runtime: node
+    plan: starter
+    # Render cron uses UTC. Running at both possible UTC hours lets the script
+    # enforce 5:00 AM America/Chicago across daylight-saving changes.
+    schedule: '0 10,11 * * *'
+    buildCommand: npm ci
+    startCommand: node generate-snap-orders-report.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONDAY_API_TOKEN
+        sync: false
+      - key: SNAP_REPORT_TO_EMAIL
+        value: efowler@psiengines.com
+      - key: M365_TENANT_ID
+        sync: false
+      - key: M365_CLIENT_ID
+        sync: false
+      - key: M365_CLIENT_SECRET
+        sync: false
+      - key: M365_SENDER_UPN
+        sync: false
+      - key: REDIS_URL
+        sync: false

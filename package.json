@@ -7,14 +7,16 @@
     "start": "node generate-email-report.js",
     "dev": "nodemon generate-email-report.js",
     "pdx:report": "node generate-pdx-daily-report.js",
-    "pdx:test-graph": "node test-pdx-graph-mail.js"
+    "pdx:test-graph": "node test-pdx-graph-mail.js",
+    "snap:report": "node generate-snap-orders-report.js",
+    "snap:preview": "node generate-snap-orders-report.js --force --dry-run"
   },
   "dependencies": {
     "@microsoft/microsoft-graph-client": "^3.0.7",
     "@mondaydotcomorg/api": "^1.0.0",
     "dotenv": "^17.2.3",
     "isomorphic-fetch": "^3.0.0",
-    "nodemailer": "^6.9.15",
+    "nodemailer": "^9.0.3",
     "redis": "^5.11.0"
   },
   "engines": {
