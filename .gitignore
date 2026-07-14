@@ -1,0 +1,7 @@
+.env
+.env.*
+!.env.example
+exports/
+history-snap-orders.json
+last-run-snap-orders.txt
+node_modules/
