@@ -37,10 +37,21 @@ async function generateReport() {
             fetchBoard(),
             runtimeStore.readHistory()
         ]);
-        const [populations, recentShipped] = await Promise.all([
+        const maximumClosedLookback = Math.max(...config.CLOSED_LOOKBACK_DAYS);
+        const [populations, activityClosedItems] = await Promise.all([
             fetchOpenOrderItems(board),
-            fetchRecentShippedItems(board, central.dateKey, 7)
+            fetchRecentShippedItems(board, central.dateKey, maximumClosedLookback)
         ]);
+        const closedItems = mergeClosedItems(populations.currentShipped, activityClosedItems);
+        const closedCounts = Object.fromEntries(config.CLOSED_LOOKBACK_DAYS.map(days => [
+            days,
+            filterCompletedWithinLookback(closedItems, central.dateKey, days).length
+        ]));
+        const recentShipped = filterCompletedWithinLookback(
+            closedItems,
+            central.dateKey,
+            config.RECENT_SHIPPED_DAYS
+        );
         const previousSnapshot = findComparisonSnapshot(history, central.dateKey, config.TREND_COMPARISON_DAYS);
         const factoryReport = summarize(populations.factorySnap, comparisonForPopulation(previousSnapshot, 'factorySnap', true));
         const fieldServiceReport = summarize(populations.fieldService, comparisonForPopulation(previousSnapshot, 'fieldService'));
@@ -49,7 +60,7 @@ async function generateReport() {
         logPopulationSummary('Factory SNAP/PIRF', factoryReport);
         logPopulationSummary('Field-issued', fieldServiceReport);
         logPopulationSummary('Drafts and missing-part requests', otherReport);
-        console.log(`Recently shipped in the last 7 days: ${recentShipped.length}.`);
+        console.log(`Items closed by lookback: ${config.CLOSED_LOOKBACK_DAYS.map(days => `${days}d=${closedCounts[days]}`).join(', ')}.`);
 
         history[central.dateKey] = {
             factorySnap: snapshotFromReport(factoryReport),
@@ -59,7 +70,7 @@ async function generateReport() {
         pruneHistory(history, config.HISTORY_RETENTION_DAYS, central.dateKey);
         await runtimeStore.writeHistory(history);
 
-        const html = generateHtml(factoryReport, fieldServiceReport, otherReport, recentShipped, history, central.dateKey);
+        const html = generateHtml(factoryReport, fieldServiceReport, otherReport, closedCounts, recentShipped, history, central.dateKey);
         const outputPath = saveHtml(html, central.dateKey);
         console.log(`HTML preview saved: ${outputPath}`);
 
@@ -114,7 +125,13 @@ async function fetchBoard() {
 }
 
 async function fetchOpenOrderItems(board) {
-    const populations = { factorySnap: [], fieldService: [], orderDrafts: [], missingFactoryRequests: [] };
+    const populations = {
+        factorySnap: [],
+        fieldService: [],
+        orderDrafts: [],
+        missingFactoryRequests: [],
+        currentShipped: []
+    };
     const populationByGroup = {
         [config.SNAP_GROUP_ID]: 'factorySnap',
         [config.FIELD_SERVICE_GROUP_ID]: 'fieldService',
@@ -147,6 +164,7 @@ async function fetchOpenOrderItems(board) {
             const item = mapOrderItem(rawItem, board.id);
             const currentStatus = item.currentStatus;
             if (config.CLOSED_CURRENT_STATUSES.some(status => status.toLowerCase() === currentStatus.toLowerCase())) {
+                populations.currentShipped.push(item);
                 continue;
             }
             populations[population].push(item);
@@ -231,6 +249,31 @@ function parseActivityTimestamp(value) {
     if (!Number.isFinite(timestamp)) return null;
     const date = new Date(Math.round(timestamp / 10000));
     return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function filterCompletedWithinLookback(items, currentDateKey, lookbackDays) {
+    const cutoff = dateKeyToUtc(currentDateKey);
+    cutoff.setUTCHours(0, 0, 0, 0);
+    cutoff.setUTCDate(cutoff.getUTCDate() - (lookbackDays - 1));
+    const end = dateKeyToUtc(currentDateKey);
+    end.setUTCHours(0, 0, 0, 0);
+    end.setUTCDate(end.getUTCDate() + 1);
+    return items.filter(item => item.completedAt >= cutoff && item.completedAt < end);
+}
+
+function mergeClosedItems(currentShipped, activityClosedItems) {
+    const itemsById = new Map(activityClosedItems.map(item => [String(item.id), item]));
+    for (const item of currentShipped) {
+        const activityItem = itemsById.get(String(item.id));
+        itemsById.set(String(item.id), {
+            ...activityItem,
+            ...item,
+            completedAt: item.dateShipped || activityItem?.completedAt || null
+        });
+    }
+    return [...itemsById.values()]
+        .filter(item => item.completedAt)
+        .sort((a, b) => b.completedAt - a.completedAt || a.name.localeCompare(b.name));
 }
 
 function mapOrderItem(rawItem, boardId) {
@@ -327,7 +370,7 @@ function attentionSort(a, b) {
         || a.name.localeCompare(b.name);
 }
 
-function generateHtml(report, fieldReport, otherReport, recentShipped, history, dateKey) {
+function generateHtml(report, fieldReport, otherReport, closedCounts, recentShipped, history, dateKey) {
     const viewUrl = `https://${config.MONDAY_SLUG}.monday.com/boards/${config.BOARD_ID}/views/${config.VIEW_ID}`;
     const fieldViewUrl = `https://${config.MONDAY_SLUG}.monday.com/boards/${config.BOARD_ID}/views/${config.FIELD_SERVICE_VIEW_ID}`;
     const generatedLabel = new Intl.DateTimeFormat('en-US', {
@@ -367,6 +410,8 @@ function generateHtml(report, fieldReport, otherReport, recentShipped, history, 
             ${metricCard('Field open', fieldReport.total, formatDelta(fieldReport.totalDelta), '#0f766e')}
             ${metricCard('Draft / other intake', otherReport.total, 'Drafts + missing-part requests', '#b45309')}
         </tr></table></td></tr>
+        ${sectionHeader('Closed throughput', 'Unique board lines changed to Shipped')}
+        <tr><td style="padding:0 24px 18px;">${renderClosedThroughputChart(closedCounts)}</td></tr>
         ${sectionHeader('Factory SNAP / PIRF orders', 'Factory-originated orders prepared for approval')}
         <tr><td style="padding:22px 24px 8px;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
@@ -387,7 +432,7 @@ function generateHtml(report, fieldReport, otherReport, recentShipped, history, 
         </tr></table></td></tr>
         ${sectionHeader('Daily trend', 'Snapshot history builds automatically each morning')}
         <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Date</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Open</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Largest stage</th></tr>${trendRows}</table></td></tr>
-        ${sectionHeader('Shipped in the last 7 days', `${recentShipped.length} line${recentShipped.length === 1 ? '' : 's'} changed to Shipped`)}
+        ${sectionHeader(`Shipped in the last ${config.RECENT_SHIPPED_DAYS} days`, `${recentShipped.length} line${recentShipped.length === 1 ? '' : 's'} changed to Shipped`)}
         <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #bbf7d0;"><tr bgcolor="#f0fdf4"><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Source</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Customer</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Tracking</th><th align="right" style="padding:8px 10px;font-size:11px;color:#166534;">Marked shipped</th></tr>${recentlyShippedRows}</table></td></tr>
         ${sectionHeader('Attention queue', `Critical/high priority first, then oldest ${config.ATTENTION_ITEM_LIMIT} orders`)}
         <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Current dept / status</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Priority</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Customer</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Age</th></tr>${itemRows}</table></td></tr>
@@ -435,7 +480,7 @@ function renderAttentionRows(items) {
 
 function renderRecentlyShippedRows(items) {
     if (!items.length) {
-        return '<tr><td colspan="5" align="center" style="padding:16px;color:#64748b;font-size:12px;">No shipments recorded in the last 7 days.</td></tr>';
+        return `<tr><td colspan="5" align="center" style="padding:16px;color:#64748b;font-size:12px;">No shipments recorded in the last ${config.RECENT_SHIPPED_DAYS} days.</td></tr>`;
     }
     return items.map(item => {
         const source = groupDisplayName(item.groupId);
@@ -455,8 +500,35 @@ function groupDisplayName(groupId) {
     return 'Other';
 }
 
-function metricCard(label, value, note, color) {
-    return `<td width="25%" valign="top" style="padding:4px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dbe3ef;"><tr><td style="padding:14px 12px;border-top:4px solid ${color};"><div style="font-size:10px;font-weight:800;color:#64748b;text-transform:uppercase;">${escapeHtml(label)}</div><div style="font-size:25px;font-weight:800;color:#0f172a;margin:4px 0;">${escapeHtml(value)}</div><div style="font-size:10px;color:#64748b;">${escapeHtml(note)}</div></td></tr></table></td>`;
+function renderClosedThroughputChart(closedCounts) {
+    const periods = [
+        { days: 7, color: '#15803d' },
+        { days: 14, color: '#0f766e' },
+        { days: 30, color: '#2563eb' }
+    ];
+    const maximum = Math.max(1, ...periods.map(period => closedCounts[period.days] || 0));
+    const rows = periods.map(period => {
+        const count = closedCounts[period.days] || 0;
+        const width = count === 0 ? 0 : Math.max(4, Math.round(count / maximum * 100));
+        const bar = width === 0
+            ? '<td height="22" bgcolor="#e2e8f0" style="background:#e2e8f0;"></td>'
+            : `<td width="${width}%" height="22" bgcolor="${period.color}" style="background:${period.color};border-radius:3px;"></td><td></td>`;
+        return `<tr>
+            <td width="85" style="padding:7px 12px 7px 0;font-size:12px;font-weight:800;color:#334155;white-space:nowrap;">Last ${period.days} days</td>
+            <td style="padding:7px 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>${bar}</tr></table></td>
+            <td width="54" align="right" style="padding:7px 0 7px 14px;font-size:20px;font-weight:900;color:${period.color};">${count}</td>
+        </tr>`;
+    }).join('');
+    return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dbe3ef;background:#f8fafc;">
+        <tr><td style="padding:15px 18px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${rows}</table>
+            <div style="padding-top:8px;font-size:10px;color:#64748b;">Bars share the same scale; totals are cumulative lookback windows.</div>
+        </td></tr>
+    </table>`;
+}
+
+function metricCard(label, value, note, color, width = 25) {
+    return `<td width="${width}%" valign="top" style="padding:4px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dbe3ef;"><tr><td style="padding:14px 12px;border-top:4px solid ${color};"><div style="font-size:10px;font-weight:800;color:#64748b;text-transform:uppercase;">${escapeHtml(label)}</div><div style="font-size:25px;font-weight:800;color:#0f172a;margin:4px 0;">${escapeHtml(value)}</div><div style="font-size:10px;color:#64748b;">${escapeHtml(note)}</div></td></tr></table></td>`;
 }
 
 function sectionHeader(title, subtitle) {

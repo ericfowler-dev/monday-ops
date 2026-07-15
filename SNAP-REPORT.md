@@ -24,12 +24,12 @@ stage on the board. All Field Service order-name formats are included; `S#`,
 Daily snapshots separately retain Factory SNAP/PIRF and Field Service totals and
 counts by **Current Dept / Status**. Each population has its own headline
 metrics, seven-day stage changes, aging, recent snapshots, and attention queue.
-The report also recovers completed records from Monday's board activity history.
-An item appears in the recent-shipment table only when **Current Dept / Status**
-changed to `Shipped` in the last seven calendar days. **Date Shipped** and
-tracking values are supporting details only because they can represent a partial
-shipment. This remains accurate when a completed item has been deleted from the
-active table.
+The overview shows unique items closed over the last 7, 14, and 30 calendar days.
+For current rows, an item is closed when **Current Dept / Status** is `Shipped`;
+its **Date Shipped** determines the reporting window. Monday's board activity
+history supplies a fallback completion date and recovers completed records that
+are no longer present on the active board. The recent-shipment table remains
+limited to the last seven calendar days.
 
 ## Commands
 
