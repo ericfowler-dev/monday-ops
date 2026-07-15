@@ -20,6 +20,8 @@ module.exports = {
     HISTORY_RETENTION_DAYS: 90,
     TREND_COMPARISON_DAYS: 7,
     ATTENTION_ITEM_LIMIT: 30,
+    CLOSED_LOOKBACK_DAYS: [7, 14, 30],
+    RECENT_SHIPPED_DAYS: 7,
 
     // Monday marks only "Shipped" as done in Current Dept / Status. "Shipped to
     // Darien" is an active internal workflow stage and must remain in this report.
