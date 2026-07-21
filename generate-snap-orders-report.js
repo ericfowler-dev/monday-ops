@@ -10,6 +10,7 @@ const LAST_RUN_FILE = path.join(__dirname, 'last-run-snap-orders.txt');
 const REDIS_HISTORY_KEY = process.env.SNAP_REDIS_HISTORY_KEY || 'snap-orders:history';
 const REDIS_LAST_RUN_KEY = process.env.SNAP_REDIS_LAST_RUN_KEY || 'snap-orders:last-run';
 const MONDAY_API_VERSION = process.env.MONDAY_API_VERSION || '2025-10';
+const EMAIL_FONT_FAMILY = "'Segoe UI',Arial,sans-serif";
 
 async function generateReport() {
     const args = new Set(process.argv.slice(2));
@@ -394,8 +395,10 @@ function generateHtml(report, fieldReport, otherReport, closedCounts, recentShip
         ? `vs. ${formatDateKey(report.comparisonSnapshot.dateKey)}`
         : 'trend baseline starts today';
 
-    return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head>
-    <body style="margin:0;padding:0;background:#f1f5f9;font-family:Segoe UI,Arial,sans-serif;color:#0f172a;">
+    const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+    <style type="text/css">body,table,td,th,div,h1,a,span{font-family:${EMAIL_FONT_FAMILY} !important;}</style>
+    <!--[if mso]><style type="text/css">body,table,td,th,div,h1,a,span{font-family:${EMAIL_FONT_FAMILY} !important;}</style><![endif]--></head>
+    <body style="margin:0;padding:0;background:#f1f5f9;font-family:${EMAIL_FONT_FAMILY};color:#0f172a;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#f1f5f9"><tr><td align="center" style="padding:24px 10px;">
     <table role="presentation" width="960" cellpadding="0" cellspacing="0" style="width:960px;max-width:100%;background:#ffffff;">
         <tr><td bgcolor="#172554" style="padding:28px 32px;background:#172554;color:#ffffff;">
@@ -453,6 +456,17 @@ function generateHtml(report, fieldReport, otherReport, closedCounts, recentShip
         <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Current dept / status</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Priority</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Customer</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Age</th></tr>${fieldItemRows}</table></td></tr>
         <tr><td bgcolor="#e0e7ff" align="center" style="padding:20px;background:#e0e7ff;"><a href="${viewUrl}" style="display:inline-block;background:#1d4ed8;color:#ffffff;text-decoration:none;font-size:13px;font-weight:800;padding:11px 16px;border-radius:4px;margin-right:6px;">Open Factory SNAP view</a><a href="${fieldViewUrl}" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;font-size:13px;font-weight:800;padding:11px 16px;border-radius:4px;">Open Field Service view</a><div style="margin-top:12px;font-size:11px;color:#475569;">Automated daily at 5:00 AM Central &nbsp;•&nbsp; Only “Shipped” items are treated as complete</div></td></tr>
     </table></td></tr></table></body></html>`;
+
+    return applyEmailFontFamily(html);
+}
+
+function applyEmailFontFamily(html) {
+    return html.replace(/<(td|th)\b([^>]*)>/gi, (tag, tagName, attributes) => {
+        if (/\bstyle\s*=\s*(["'])/i.test(attributes)) {
+            return tag.replace(/\bstyle\s*=\s*(["'])/i, `style=$1font-family:${EMAIL_FONT_FAMILY};`);
+        }
+        return `<${tagName}${attributes} style="font-family:${EMAIL_FONT_FAMILY};">`;
+    });
 }
 
 function renderStatusRows(report, barColor) {
