@@ -9,7 +9,16 @@
     "pdx:report": "node generate-pdx-daily-report.js",
     "pdx:test-graph": "node test-pdx-graph-mail.js",
     "snap:report": "node generate-snap-orders-report.js",
-    "snap:preview": "node generate-snap-orders-report.js --force --dry-run"
+    "snap:preview": "node generate-snap-orders-report.js --force --dry-run",
+    "movement:report": "node generate-weekly-movement-report.js",
+    "movement:preview": "node generate-weekly-movement-report.js --force --dry-run",
+    "movement:test": "node --test weekly-movement-core.test.js",
+    "snap:dashboard:dev": "npm --prefix snap-dashboard run dev:mock",
+    "snap:dashboard:test": "npm --prefix snap-dashboard test",
+    "snap:dashboard:build": "npm --prefix snap-dashboard run build",
+    "snap:approval:dev": "npm --prefix SNAP-FORM/snap-approval-poc run dev",
+    "snap:approval:test": "npm --prefix SNAP-FORM/snap-approval-poc test",
+    "snap:approval:build": "npm --prefix SNAP-FORM/snap-approval-poc run build"
   },
   "dependencies": {
     "@microsoft/microsoft-graph-client": "^3.0.7",

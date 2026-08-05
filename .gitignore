@@ -4,7 +4,9 @@
 .mappsrc
 exports/
 history-snap-orders.json
+history-weekly-movement.json
 last-run-snap-orders.txt
+last-run-weekly-movement.txt
 node_modules/
 snap-dashboard/dist/
 snap-dashboard/dist.zip
