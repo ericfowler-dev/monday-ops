@@ -9,7 +9,7 @@ const HISTORY_FILE = path.join(__dirname, 'history-snap-orders.json');
 const LAST_RUN_FILE = path.join(__dirname, 'last-run-snap-orders.txt');
 const REDIS_HISTORY_KEY = process.env.SNAP_REDIS_HISTORY_KEY || 'snap-orders:history';
 const REDIS_LAST_RUN_KEY = process.env.SNAP_REDIS_LAST_RUN_KEY || 'snap-orders:last-run';
-const MONDAY_API_VERSION = process.env.MONDAY_API_VERSION || '2025-10';
+const MONDAY_API_VERSION = process.env.MONDAY_API_VERSION || '2026-07';
 const EMAIL_FONT_FAMILY = "'Segoe UI',Arial,sans-serif";
 
 async function generateReport() {
@@ -55,23 +55,27 @@ async function generateReport() {
         );
         const previousSnapshot = findComparisonSnapshot(history, central.dateKey, config.TREND_COMPARISON_DAYS);
         const factoryReport = summarize(populations.factorySnap, comparisonForPopulation(previousSnapshot, 'factorySnap', true));
-        const fieldServiceReport = summarize(populations.fieldService, comparisonForPopulation(previousSnapshot, 'fieldService'));
-        const otherItems = [...populations.orderDrafts, ...populations.missingFactoryRequests];
-        const otherReport = summarize(otherItems, comparisonForPopulation(previousSnapshot, 'otherBoardGroups'));
-        logPopulationSummary('Factory SNAP/PIRF', factoryReport);
-        logPopulationSummary('Field-issued', fieldServiceReport);
-        logPopulationSummary('Drafts and missing-part requests', otherReport);
+        const fieldMissingPartsReport = summarize(populations.fieldMissingParts, comparisonForPopulation(previousSnapshot, 'fieldMissingParts'));
+        const fieldWarrantyReport = summarize(populations.fieldWarranty, comparisonForPopulation(previousSnapshot, 'fieldWarranty'));
+        const otherReport = summarize(populations.otherBoardGroups, comparisonForPopulation(previousSnapshot, 'otherBoardGroups'));
+        logPopulationSummary('Factory SNAPs', factoryReport);
+        logPopulationSummary('Field Missing Parts', fieldMissingPartsReport);
+        logPopulationSummary('Field Warranty', fieldWarrantyReport);
+        logPopulationSummary('Service, drafts, and other', otherReport);
         console.log(`Items closed by lookback: ${config.CLOSED_LOOKBACK_DAYS.map(days => `${days}d=${closedCounts[days]}`).join(', ')}.`);
 
         history[central.dateKey] = {
             factorySnap: snapshotFromReport(factoryReport),
-            fieldService: snapshotFromReport(fieldServiceReport),
+            fieldMissingParts: snapshotFromReport(fieldMissingPartsReport),
+            fieldWarranty: snapshotFromReport(fieldWarrantyReport),
             otherBoardGroups: snapshotFromReport(otherReport)
         };
         pruneHistory(history, config.HISTORY_RETENTION_DAYS, central.dateKey);
-        await runtimeStore.writeHistory(history);
+        if (!dryRun) {
+            await runtimeStore.writeHistory(history);
+        }
 
-        const html = generateHtml(factoryReport, fieldServiceReport, otherReport, closedCounts, recentShipped, history, central.dateKey);
+        const html = generateHtml(factoryReport, fieldMissingPartsReport, fieldWarrantyReport, otherReport, closedCounts, recentShipped, history, central.dateKey);
         const outputPath = saveHtml(html, central.dateKey);
         console.log(`HTML preview saved: ${outputPath}`);
 
@@ -128,17 +132,17 @@ async function fetchBoard() {
 async function fetchOpenOrderItems(board) {
     const populations = {
         factorySnap: [],
-        fieldService: [],
-        orderDrafts: [],
-        missingFactoryRequests: [],
+        fieldMissingParts: [],
+        fieldWarranty: [],
+        otherBoardGroups: [],
         currentShipped: []
     };
-    const populationByGroup = {
-        [config.SNAP_GROUP_ID]: 'factorySnap',
-        [config.FIELD_SERVICE_GROUP_ID]: 'fieldService',
-        [config.DRAFT_GROUP_ID]: 'orderDrafts',
-        [config.MISSING_FACTORY_GROUP_ID]: 'missingFactoryRequests'
-    };
+    const relevantGroups = new Set([
+        config.SNAP_GROUP_ID,
+        config.FIELD_SERVICE_GROUP_ID,
+        config.DRAFT_GROUP_ID,
+        config.MISSING_FACTORY_GROUP_ID
+    ]);
     const columnIds = Object.values(config.COL_IDS);
     let cursor = null;
 
@@ -158,8 +162,7 @@ async function fetchOpenOrderItems(board) {
 
         const page = data.boards[0]?.items_page;
         for (const rawItem of page?.items || []) {
-            const population = populationByGroup[rawItem.group?.id];
-            if (rawItem.state !== 'active' || !population) {
+            if (rawItem.state !== 'active' || !relevantGroups.has(rawItem.group?.id)) {
                 continue;
             }
             const item = mapOrderItem(rawItem, board.id);
@@ -168,6 +171,7 @@ async function fetchOpenOrderItems(board) {
                 populations.currentShipped.push(item);
                 continue;
             }
+            const population = classifyOrderPopulation(item);
             populations[population].push(item);
         }
         cursor = page?.cursor || null;
@@ -221,7 +225,7 @@ async function fetchRecentShippedItems(board, currentDateKey, lookbackDays) {
     const ids = [...shippedEvents.keys()];
     for (let offset = 0; offset < ids.length; offset += 100) {
         const data = await mondayQuery(`query ($itemIds: [ID!], $columnIds: [String!]) {
-            items(ids: $itemIds) {
+            items(ids: $itemIds, limit: 100) {
                 id name state created_at
                 board { id }
                 group { id title }
@@ -289,6 +293,7 @@ function mapOrderItem(rawItem, boardId) {
         groupName: rawItem.group?.title || '',
         state: rawItem.state,
         url: `https://${config.MONDAY_SLUG}.monday.com/boards/${boardId}/pulses/${rawItem.id}`,
+        orderType: columns[config.COL_IDS.ORDER_TYPE] || '',
         currentStatus: columns[config.COL_IDS.CURRENT_STATUS] || 'Unassigned',
         priority: columns[config.COL_IDS.PRIORITY] || '',
         requestedBy: columns[config.COL_IDS.REQUESTED_BY] || '',
@@ -309,7 +314,24 @@ function mapOrderItem(rawItem, boardId) {
     };
 }
 
+function classifyOrderPopulation(item) {
+    const orderTypes = new Set(String(item.orderType || '')
+        .split(',')
+        .map(value => value.trim().toLowerCase())
+        .filter(Boolean));
+
+    if (item.groupId === config.SNAP_GROUP_ID && orderTypes.has('snap')) return 'factorySnap';
+    if (item.groupId !== config.FIELD_SERVICE_GROUP_ID) return 'otherBoardGroups';
+
+    const isMissingParts = orderTypes.has('missing parts');
+    const isWarranty = orderTypes.has('warranty');
+    if (isMissingParts && !isWarranty) return 'fieldMissingParts';
+    if (isWarranty && !isMissingParts) return 'fieldWarranty';
+    return 'otherBoardGroups';
+}
+
 function summarize(items, comparisonSnapshot) {
+    const now = new Date();
     const byCurrentStatus = countBy(items, item => item.currentStatus || 'Unassigned');
     const byPriority = countBy(items, item => item.priority || 'Not set');
     const byCustomer = countBy(items, item => item.customer || 'Not set');
@@ -339,7 +361,8 @@ function summarize(items, comparisonSnapshot) {
         averageAge,
         agingBuckets,
         over30Days: datedItems.filter(item => item.ageDays > 30).length,
-        newLast7Days: items.filter(item => item.orderDate && daysBetween(item.orderDate, new Date()) <= 7).length,
+        newLast7Days: items.filter(item => isDateWithinLookback(item.orderDate, now, 7)).length,
+        newLast30Days: items.filter(item => isDateWithinLookback(item.orderDate, now, 30)).length,
         priorityAttention: priorityAttention.length,
         dataGaps: dataGaps.length,
         attentionItems,
@@ -371,29 +394,14 @@ function attentionSort(a, b) {
         || a.name.localeCompare(b.name);
 }
 
-function generateHtml(report, fieldReport, otherReport, closedCounts, recentShipped, history, dateKey) {
+function generateHtml(factoryReport, fieldMissingPartsReport, fieldWarrantyReport, otherReport, closedCounts, recentShipped, history, dateKey) {
     const viewUrl = `https://${config.MONDAY_SLUG}.monday.com/boards/${config.BOARD_ID}/views/${config.VIEW_ID}`;
     const fieldViewUrl = `https://${config.MONDAY_SLUG}.monday.com/boards/${config.BOARD_ID}/views/${config.FIELD_SERVICE_VIEW_ID}`;
     const generatedLabel = new Intl.DateTimeFormat('en-US', {
         timeZone: config.TIME_ZONE, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
     }).format(new Date());
-    const statusRows = renderStatusRows(report, '#2563eb');
-    const fieldStatusRows = renderStatusRows(fieldReport, '#0f766e');
-
-    const agingRows = Object.entries(report.agingBuckets).map(([label, count]) => tableCountRow(label, count, report.total)).join('');
-    const priorityRows = Object.entries(report.byPriority).sort((a, b) => b[1] - a[1]).map(([label, count]) => tableCountRow(label, count, report.total)).join('');
-    const customerRows = Object.entries(report.byCustomer).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([label, count]) => tableCountRow(label, count, report.total)).join('');
-    const trendRows = renderTrendRows(history, 'factorySnap', true);
-    const fieldTrendRows = renderTrendRows(history, 'fieldService');
-    const itemRows = renderAttentionRows(report.attentionItems);
-    const fieldItemRows = renderAttentionRows(fieldReport.attentionItems);
-    const fieldAgingRows = Object.entries(fieldReport.agingBuckets).map(([label, count]) => tableCountRow(label, count, fieldReport.total)).join('');
-    const fieldRequestorRows = Object.entries(fieldReport.byRequestedBy).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([label, count]) => tableCountRow(label, count, fieldReport.total)).join('');
-    const fieldCustomerRows = Object.entries(fieldReport.byCustomer).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([label, count]) => tableCountRow(label, count, fieldReport.total)).join('');
     const recentlyShippedRows = renderRecentlyShippedRows(recentShipped);
-    const comparisonLabel = report.comparisonSnapshot
-        ? `vs. ${formatDateKey(report.comparisonSnapshot.dateKey)}`
-        : 'trend baseline starts today';
+    const activeTotal = factoryReport.total + fieldMissingPartsReport.total + fieldWarrantyReport.total + otherReport.total;
 
     const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
     <style type="text/css">body,table,td,th,div,h1,a,span{font-family:${EMAIL_FONT_FAMILY} !important;}</style>
@@ -404,56 +412,22 @@ function generateHtml(report, fieldReport, otherReport, closedCounts, recentShip
         <tr><td bgcolor="#172554" style="padding:28px 32px;background:#172554;color:#ffffff;">
             <div style="font-size:11px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;color:#bfdbfe;">Order Tracker Operations</div>
             <h1 style="margin:7px 0 5px;font-size:28px;line-height:34px;">Open Parts Orders</h1>
-            <div style="font-size:13px;color:#dbeafe;">${escapeHtml(generatedLabel)} &nbsp;•&nbsp; Grouped by Current Dept / Status</div>
+            <div style="font-size:13px;color:#dbeafe;">${escapeHtml(generatedLabel)} &nbsp;•&nbsp; Classified by Order Type</div>
         </td></tr>
-        ${sectionHeader('At a glance', 'All active Order Tracker groups')}
+        ${sectionHeader('At a glance', 'Open workload classified by the Order Type column')}
         <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
-            ${metricCard('Active board lines', report.total + fieldReport.total + otherReport.total, 'All Order Tracker groups', '#172554')}
-            ${metricCard('Factory open', report.total, formatDelta(report.totalDelta), '#1d4ed8')}
-            ${metricCard('Field open', fieldReport.total, formatDelta(fieldReport.totalDelta), '#0f766e')}
-            ${metricCard('Draft / other intake', otherReport.total, 'Drafts + missing-part requests', '#b45309')}
+            ${metricCard('Active board lines', activeTotal, `${otherReport.total} service / draft / other`, '#172554')}
+            ${metricCard('Factory SNAPs', factoryReport.total, `${factoryReport.newLast30Days} new in 30 days`, '#1d4ed8')}
+            ${metricCard('Field missing parts', fieldMissingPartsReport.total, `${fieldMissingPartsReport.newLast30Days} new in 30 days`, '#0f766e')}
+            ${metricCard('Field warranty', fieldWarrantyReport.total, `${fieldWarrantyReport.newLast30Days} new in 30 days`, '#7c3aed')}
         </tr></table></td></tr>
         ${sectionHeader('Closed throughput', 'Unique board lines changed to Shipped')}
         <tr><td style="padding:0 24px 18px;">${renderClosedThroughputChart(closedCounts)}</td></tr>
-        ${sectionHeader('Factory SNAP / PIRF orders', 'Factory-originated orders prepared for approval')}
-        <tr><td style="padding:22px 24px 8px;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
-                ${metricCard('Open orders', report.total, formatDelta(report.totalDelta), '#1d4ed8')}
-                ${metricCard('Average age', report.averageAge === null ? '—' : `${report.averageAge}d`, `${report.over30Days} over 30d`, '#0f766e')}
-                ${metricCard('New in 7 days', report.newLast7Days, 'by order date', '#7c3aed')}
-                ${metricCard('High / critical', report.priorityAttention, `${report.dataGaps} data gaps`, '#b45309')}
-            </tr></table>
-            <div style="font-size:11px;color:#64748b;margin:8px 4px 0;">${escapeHtml(comparisonLabel)}</div>
-        </td></tr>
-        ${sectionHeader('Current Dept / Status', 'Current workload and change by workflow stage')}
-        <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:9px 12px;font-size:11px;color:#64748b;text-transform:uppercase;">Department / stage</th><th></th><th align="right" style="padding:9px 12px;font-size:11px;color:#64748b;text-transform:uppercase;">Open</th><th align="right" style="padding:9px 12px;font-size:11px;color:#64748b;text-transform:uppercase;">7-day Δ</th></tr>${statusRows}</table></td></tr>
-        ${sectionHeader('Operational profile', 'Aging, priority, and customer concentration')}
-        <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
-            <td width="32%" valign="top">${miniTable('Aging', agingRows)}</td><td width="2%"></td>
-            <td width="32%" valign="top">${miniTable('Priority', priorityRows)}</td><td width="2%"></td>
-            <td width="32%" valign="top">${miniTable('Top customers', customerRows)}</td>
-        </tr></table></td></tr>
-        ${sectionHeader('Daily trend', 'Snapshot history builds automatically each morning')}
-        <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Date</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Open</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Largest stage</th></tr>${trendRows}</table></td></tr>
+        ${renderPopulationSection({ title: 'Factory SNAP orders', subtitle: 'SNAP order type in the Factory group', report: factoryReport, history, populationKey: 'factorySnap', color: '#1d4ed8', lightColor: '#dbeafe', darkColor: '#1e3a8a', allowLegacy: true })}
+        ${renderPopulationSection({ title: 'Field missing-parts orders', subtitle: 'Missing Parts order type in the Field Service group', report: fieldMissingPartsReport, history, populationKey: 'fieldMissingParts', color: '#0f766e', lightColor: '#ccfbf1', darkColor: '#134e4a' })}
+        ${renderPopulationSection({ title: 'Field warranty orders', subtitle: 'Warranty order type in the Field Service group', report: fieldWarrantyReport, history, populationKey: 'fieldWarranty', color: '#7c3aed', lightColor: '#ede9fe', darkColor: '#5b21b6' })}
         ${sectionHeader(`Shipped in the last ${config.RECENT_SHIPPED_DAYS} days`, `${recentShipped.length} line${recentShipped.length === 1 ? '' : 's'} changed to Shipped`)}
         <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #bbf7d0;"><tr bgcolor="#f0fdf4"><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Source</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Customer</th><th align="left" style="padding:8px 10px;font-size:11px;color:#166534;">Tracking</th><th align="right" style="padding:8px 10px;font-size:11px;color:#166534;">Marked shipped</th></tr>${recentlyShippedRows}</table></td></tr>
-        ${sectionHeader('Attention queue', `Critical/high priority first, then oldest ${config.ATTENTION_ITEM_LIMIT} orders`)}
-        <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Current dept / status</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Priority</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Customer</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Age</th></tr>${itemRows}</table></td></tr>
-        <tr><td bgcolor="#ccfbf1" style="padding:18px 24px;background:#ccfbf1;border-top:5px solid #0f766e;"><div style="font-size:20px;font-weight:800;color:#134e4a;">Field-issued orders</div><div style="font-size:12px;color:#115e59;margin-top:4px;">All orders in the Field Service Orders group, including S#, W#, Sales Order, and other order types</div></td></tr>
-        <tr><td style="padding:22px 24px 8px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
-            ${metricCard('Open field orders', fieldReport.total, formatDelta(fieldReport.totalDelta), '#0f766e')}
-            ${metricCard('Average age', fieldReport.averageAge === null ? '—' : `${fieldReport.averageAge}d`, `${fieldReport.over30Days} over 30d`, '#0f766e')}
-            ${metricCard('New in 7 days', fieldReport.newLast7Days, 'by order date', '#7c3aed')}
-            ${metricCard('High / critical', fieldReport.priorityAttention, `${fieldReport.dataGaps} data gaps`, '#b45309')}
-        </tr></table></td></tr>
-        ${sectionHeader('Field Current Dept / Status', 'Current field-issued workload and seven-day change')}
-        <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:9px 12px;font-size:11px;color:#64748b;">Department / stage</th><th></th><th align="right" style="padding:9px 12px;font-size:11px;color:#64748b;">Open</th><th align="right" style="padding:9px 12px;font-size:11px;color:#64748b;">7-day Δ</th></tr>${fieldStatusRows}</table></td></tr>
-        ${sectionHeader('Field operational profile', 'Aging, originating requestors, and customer concentration')}
-        <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td width="32%" valign="top">${miniTable('Aging', fieldAgingRows)}</td><td width="2%"></td><td width="32%" valign="top">${miniTable('Requested by', fieldRequestorRows)}</td><td width="2%"></td><td width="32%" valign="top">${miniTable('Top customers', fieldCustomerRows)}</td></tr></table></td></tr>
-        ${sectionHeader('Field daily trend', 'Separate snapshot history for field-issued orders')}
-        <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Date</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Open</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Largest stage</th></tr>${fieldTrendRows}</table></td></tr>
-        ${sectionHeader('Field attention queue', `All order types included; critical/high priority first, then oldest ${config.ATTENTION_ITEM_LIMIT}`)}
-        <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Current dept / status</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Priority</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Customer</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Age</th></tr>${fieldItemRows}</table></td></tr>
         <tr><td bgcolor="#e0e7ff" align="center" style="padding:20px;background:#e0e7ff;"><a href="${viewUrl}" style="display:inline-block;background:#1d4ed8;color:#ffffff;text-decoration:none;font-size:13px;font-weight:800;padding:11px 16px;border-radius:4px;margin-right:6px;">Open Factory SNAP view</a><a href="${fieldViewUrl}" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;font-size:13px;font-weight:800;padding:11px 16px;border-radius:4px;">Open Field Service view</a><div style="margin-top:12px;font-size:11px;color:#475569;">Automated daily at 5:00 AM Central &nbsp;•&nbsp; Only “Shipped” items are treated as complete</div></td></tr>
     </table></td></tr></table></body></html>`;
 
@@ -467,6 +441,36 @@ function applyEmailFontFamily(html) {
         }
         return `<${tagName}${attributes} style="font-family:${EMAIL_FONT_FAMILY};">`;
     });
+}
+
+function renderPopulationSection({ title, subtitle, report, history, populationKey, color, lightColor, darkColor, allowLegacy = false }) {
+    const statusRows = renderStatusRows(report, color) || `<tr><td colspan="4" align="center" style="padding:14px;color:#64748b;font-size:12px;">No open orders in this bucket.</td></tr>`;
+    const agingRows = Object.entries(report.agingBuckets).map(([label, count]) => tableCountRow(label, count, report.total)).join('');
+    const priorityRows = Object.entries(report.byPriority).sort((a, b) => b[1] - a[1]).map(([label, count]) => tableCountRow(label, count, report.total)).join('');
+    const customerRows = Object.entries(report.byCustomer).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([label, count]) => tableCountRow(label, count, report.total)).join('');
+    const trendRows = renderTrendRows(history, populationKey, allowLegacy) || `<tr><td colspan="3" align="center" style="padding:14px;color:#64748b;font-size:12px;">Trend baseline starts today.</td></tr>`;
+    const itemRows = renderAttentionRows(report.attentionItems) || `<tr><td colspan="5" align="center" style="padding:14px;color:#64748b;font-size:12px;">No open orders in this bucket.</td></tr>`;
+    const comparisonLabel = report.comparisonSnapshot
+        ? `vs. ${formatDateKey(report.comparisonSnapshot.dateKey)}`
+        : 'trend baseline starts today';
+
+    return `
+        <tr><td bgcolor="${lightColor}" style="padding:18px 24px;background:${lightColor};border-top:5px solid ${color};"><div style="font-size:20px;font-weight:800;color:${darkColor};">${escapeHtml(title)}</div><div style="font-size:12px;color:${darkColor};margin-top:4px;">${escapeHtml(subtitle)}</div></td></tr>
+        <tr><td style="padding:22px 24px 8px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+            ${metricCard('Open orders', report.total, formatDelta(report.totalDelta), color, 20)}
+            ${metricCard('Average age', report.averageAge === null ? '—' : `${report.averageAge}d`, `${report.over30Days} over 30d`, color, 20)}
+            ${metricCard('New in 7 days', report.newLast7Days, 'by order date', '#7c3aed', 20)}
+            ${metricCard('New in 30 days', report.newLast30Days, 'by order date', '#0f766e', 20)}
+            ${metricCard('High / critical', report.priorityAttention, `${report.dataGaps} data gaps`, '#b45309', 20)}
+        </tr></table><div style="font-size:11px;color:#64748b;margin:8px 4px 0;">${escapeHtml(comparisonLabel)}</div></td></tr>
+        ${sectionHeader(`${title} · Current Dept / Status`, 'Current workload and seven-day change by workflow stage')}
+        <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:9px 12px;font-size:11px;color:#64748b;">Department / stage</th><th></th><th align="right" style="padding:9px 12px;font-size:11px;color:#64748b;">Open</th><th align="right" style="padding:9px 12px;font-size:11px;color:#64748b;">7-day Δ</th></tr>${statusRows}</table></td></tr>
+        ${sectionHeader(`${title} · Operational profile`, 'Aging, priority, and customer concentration')}
+        <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td width="32%" valign="top">${miniTable('Aging', agingRows)}</td><td width="2%"></td><td width="32%" valign="top">${miniTable('Priority', priorityRows)}</td><td width="2%"></td><td width="32%" valign="top">${miniTable('Top customers', customerRows)}</td></tr></table></td></tr>
+        ${sectionHeader(`${title} · Daily trend`, 'Separate snapshot history for this order type')}
+        <tr><td style="padding:0 24px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Date</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Open</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Largest stage</th></tr>${trendRows}</table></td></tr>
+        ${sectionHeader(`${title} · Attention queue`, `Critical/high priority first, then oldest ${config.ATTENTION_ITEM_LIMIT} orders`)}
+        <tr><td style="padding:0 24px 24px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;"><tr bgcolor="#f8fafc"><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Order</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Current dept / status</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Priority</th><th align="left" style="padding:8px 10px;font-size:11px;color:#64748b;">Customer</th><th align="right" style="padding:8px 10px;font-size:11px;color:#64748b;">Age</th></tr>${itemRows}</table></td></tr>`;
 }
 
 function renderStatusRows(report, barColor) {
@@ -497,7 +501,7 @@ function renderRecentlyShippedRows(items) {
         return `<tr><td colspan="5" align="center" style="padding:16px;color:#64748b;font-size:12px;">No shipments recorded in the last ${config.RECENT_SHIPPED_DAYS} days.</td></tr>`;
     }
     return items.map(item => {
-        const source = groupDisplayName(item.groupId);
+        const source = groupDisplayName(item);
         const tracking = item.trackingNumber || item.supplierTracking || '—';
         const orderLabel = item.state === 'active'
             ? `<a href="${item.url}" style="color:#166534;text-decoration:none;font-weight:700;">${escapeHtml(item.name)}</a>`
@@ -506,11 +510,13 @@ function renderRecentlyShippedRows(items) {
     }).join('');
 }
 
-function groupDisplayName(groupId) {
-    if (groupId === config.FIELD_SERVICE_GROUP_ID) return 'Field-issued';
-    if (groupId === config.SNAP_GROUP_ID) return 'Factory SNAP/PIRF';
-    if (groupId === config.MISSING_FACTORY_GROUP_ID) return 'Missing Part Factory';
-    if (groupId === config.DRAFT_GROUP_ID) return 'Order Draft';
+function groupDisplayName(item) {
+    if (item.groupId === config.FIELD_SERVICE_GROUP_ID && /missing parts/i.test(item.orderType)) return 'Field · Missing Parts';
+    if (item.groupId === config.FIELD_SERVICE_GROUP_ID && /warranty/i.test(item.orderType)) return 'Field · Warranty';
+    if (item.groupId === config.FIELD_SERVICE_GROUP_ID) return `Field · ${item.orderType || 'Other'}`;
+    if (item.groupId === config.SNAP_GROUP_ID) return 'Factory · SNAP';
+    if (item.groupId === config.MISSING_FACTORY_GROUP_ID) return 'Missing Part Factory';
+    if (item.groupId === config.DRAFT_GROUP_ID) return 'Order Draft';
     return 'Other';
 }
 
@@ -640,7 +646,7 @@ async function sendEmail(html, dateKey) {
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
             message: {
-                subject: `Open Factory SNAP & Field-Issued Orders - ${formatDateKey(dateKey)}`,
+                subject: `Open SNAP, Missing Parts & Warranty Orders - ${formatDateKey(dateKey)}`,
                 body: { contentType: 'HTML', content: html },
                 toRecipients: recipients.map(address => ({ emailAddress: { address } }))
             },
@@ -701,6 +707,14 @@ function parseDate(value) {
 
 function daysBetween(start, end) {
     return Math.max(0, Math.floor((end.getTime() - start.getTime()) / 86400000));
+}
+
+function isDateWithinLookback(date, now, lookbackDays) {
+    if (!date || !now || lookbackDays < 1) return false;
+    const dateDay = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+    const currentDay = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    const ageDays = Math.floor((currentDay - dateDay) / 86400000);
+    return ageDays >= 0 && ageDays < lookbackDays;
 }
 
 function dateKeyToUtc(dateKey) {

@@ -1,10 +1,14 @@
 # Open SNAP Orders daily report
 
-This report reads the **Order Tracker** board and covers both factory-originated
-SNAP/PIRF orders and field-issued orders:
+This report reads the **Order Tracker** board and tracks three independent
+operational populations:
+
+- Factory SNAP orders
+- Field Missing Parts orders
+- Field Warranty orders
 
 - Board: `18414349860`
-- View: `269601110`
+- View: `269601790`
 - SNAP group: `group_title`
 - Field Service group: `topics`
 - Field Service view: `263347143`
@@ -14,16 +18,20 @@ SNAP/PIRF orders and field-issued orders:
 ## Report logic
 
 The whole-board overview counts active lines from all four main-table groups.
-Detailed operational sections cover SNAPs and Field Service Orders, while Drafts
-and Missing Part Factory Requests remain separately visible as intake. An item
-is open when its **Current Dept / Status** is not `Shipped`.
+The three detailed operational sections use the **Order Type** column together
+with the Factory and Field Service groups. Service, Sales Order, ambiguous
+multi-select values, Drafts, and Missing Part Factory Requests remain visible as
+the remainder in the active total rather than being folded into a requested
+bucket. An item is open when its **Current Dept / Status** is not `Shipped`.
 `Shipped to Darien` remains open because it is an active internal workflow
-stage on the board. All Field Service order-name formats are included; `S#`,
-`W#`, and Sales Order names are types, not report filters.
+stage on the board.
 
-Daily snapshots separately retain Factory SNAP/PIRF and Field Service totals and
-counts by **Current Dept / Status**. Each population has its own headline
+Daily snapshots separately retain Factory SNAP, Field Missing Parts, Field
+Warranty, and remainder totals and counts by **Current Dept / Status**. Each
+requested population has its own headline
 metrics, seven-day stage changes, aging, recent snapshots, and attention queue.
+Each requested population also shows new orders in the last 7 and 30 calendar
+days based on **Order Date**.
 The overview shows unique items closed over the last 7, 14, and 30 calendar days.
 For current rows, an item is closed when **Current Dept / Status** is `Shipped`;
 its **Date Shipped** determines the reporting window. Monday's board activity

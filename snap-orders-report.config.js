@@ -2,7 +2,7 @@ module.exports = {
     MONDAY_SLUG: 'psiengines-company',
     BOARD_ID: '18414349860',
     BOARD_NAME: 'Order Tracker',
-    VIEW_ID: '269601110',
+    VIEW_ID: '269601790',
     VIEW_NAME: 'Open SNAP Orders',
     SNAP_GROUP_ID: 'group_title',
     SNAP_GROUP_NAME: 'SNAPs',
@@ -28,6 +28,7 @@ module.exports = {
     CLOSED_CURRENT_STATUSES: ['Shipped'],
 
     COL_IDS: {
+        ORDER_TYPE: 'dropdown_mm5a5mf7',
         CURRENT_STATUS: 'color_mm3jmw19',
         PRIORITY: 'color_mm3jz8vj',
         REQUESTED_BY: 'multiple_person_mm3jv3wx',

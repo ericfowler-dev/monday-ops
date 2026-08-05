@@ -1,0 +1,31 @@
+{
+  "version": "1.0.0",
+  "app": {
+    "name": "Order Tracker Operations",
+    "slug": "psiengines-company_order-tracker-operations",
+    "color": "#172554",
+    "oauth": {
+      "scopes": ["boards:read"]
+    },
+    "features": [
+      {
+        "key": "operations_dashboard",
+        "type": "AppFeatureBoardView",
+        "name": "Operations Dashboard",
+        "schemaVersion": "18",
+        "build": {
+          "url": "https://vb251e46c86ba95ad62cfb95a75e5fbd6.cdn2.monday.app",
+          "kind": "url"
+        },
+        "data": {
+          "name": "Operations Dashboard",
+          "mode": "iframe",
+          "hideSidekick": false,
+          "query_parmas": true,
+          "hideBoardControls": false,
+          "isMobileSupported": false
+        }
+      }
+    ]
+  }
+}

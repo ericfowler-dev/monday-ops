@@ -1,7 +1,11 @@
 .env
 .env.*
 !.env.example
+.mappsrc
 exports/
 history-snap-orders.json
 last-run-snap-orders.txt
 node_modules/
+snap-dashboard/dist/
+snap-dashboard/dist.zip
+temp.zip
