@@ -48,9 +48,14 @@ The private app was created with monday's CLI on July 15, 2026 and most
 recently deployed on August 5, 2026:
 
 - App: **Order Tracker Operations** (`11712414`)
-- Live version: `16152919`
+- Live version: `16655568` (v6)
 - Board view: **Operations Dashboard** (`269944734`)
 - Permission: `boards:read`
+
+Note: a live app version pins its board-view feature to a specific CDN URL.
+Pushing client code to a *different* version's deployment does not change what
+the live view serves. Keep the feature's build URL and the pushed version in
+sync (see `monday-manifest.json`).
 
 The feature is intentionally restricted in code to board `18414349860` so it
 cannot silently calculate against a board with different groups or columns.
@@ -68,12 +73,13 @@ Build and upload the client-side bundle to the current app version:
 
 ```powershell
 npm run build
-mapps code:push --client-side --directoryPath .\dist --appVersionId 16152919 --security-scan
+mapps code:push --client-side --directoryPath .\dist --appVersionId 16655568 --force
 ```
 
-The current production client is hosted by monday at:
+(`--force` is required once the version is live.) The current production
+client is hosted by monday at:
 
-`https://va69949c783a3ecdf4aa2241bbcba406d.cdn2.monday.app`
+`https://v4048abecef92e64145464b273354114c.cdn2.monday.app`
 
 The version has been promoted to live. To make it available to account users,
 open the app in Developer Center, select **Distribute → Install app**, and click
