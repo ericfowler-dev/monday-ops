@@ -374,7 +374,7 @@ async function sendEmail(html, now) {
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
             message: {
-                subject: `Open Orders — Action & Waiting — ${formatShortDate(now)}`,
+                subject: `SNAP & Open Order Movement Dashboard ${formatSubjectDate(now)}`,
                 body: { contentType: 'HTML', content: html },
                 toRecipients: recipients.map(address => ({ emailAddress: { address } }))
             },
@@ -401,6 +401,7 @@ function parseDate(value) { const date = value ? new Date(value) : null; return 
 function daysBetween(start, end) { return start ? Math.max(0, Math.floor((end - start) / 86400000)) : null; }
 function formatLongDate(date) { return new Intl.DateTimeFormat('en-US', { timeZone: config.TIME_ZONE, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }).format(date); }
 function formatShortDate(date) { return new Intl.DateTimeFormat('en-US', { timeZone: config.TIME_ZONE, month: 'numeric', day: 'numeric', year: 'numeric' }).format(date); }
+function formatSubjectDate(date) { return new Intl.DateTimeFormat('en-US', { timeZone: config.TIME_ZONE, month: '2-digit', day: '2-digit', year: 'numeric' }).format(date); }
 function formatDateTime(date) { return new Intl.DateTimeFormat('en-US', { timeZone: config.TIME_ZONE, month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(date); }
 function splitRecipients(value) { return String(value || '').split(/[;,]/).map(entry => entry.trim()).filter(Boolean); }
 function escapeHtml(value) { return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
