@@ -7,7 +7,7 @@ services:
     # enforce Monday 5:00 AM America/Chicago across daylight-saving changes.
     schedule: '0 10,11 * * 1'
     buildCommand: npm ci
-    startCommand: node generate-weekly-movement-report.js
+    startCommand: node generate-dynamic-owner-preview.js --send
     envVars:
       - key: NODE_ENV
         value: production
