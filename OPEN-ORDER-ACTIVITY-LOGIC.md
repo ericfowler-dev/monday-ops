@@ -72,12 +72,31 @@ An order can credit multiple owners during the same week when each owner acts du
 | Current open | Unique open orders currently in the population, including informational supplier-waiting stages |
 | Received | Distinct owner-item relationships newly assigned during the seven-day window |
 | Actioned | Distinct owner-item relationships with at least one qualifying action during the window |
-| Handed off | Distinct owner-item relationships that transitioned to another owner, outside group, informational stage, or closed stage |
+| Moved Onward (was Handed off) | Distinct owner-item relationships that transitioned to another owner, outside group, informational stage, or closed stage |
+| Net flow | Received minus Moved Onward; positive means assignments accumulated during the period |
 | Waiting >24h | Current owner has had no qualifying action since receiving/acting on the item for more than 24 hours |
-| Waiting >=7d | No qualifying action was found in the available seven-day history; actual waiting time may be longer |
-| Past 6 weeks | Current order age exceeds 42 days using Order Date, with item creation as fallback |
-| % acted | Actioned divided by eligible owner-item relationships (actioned during the window or currently waiting >24h), each relationship counted once |
-| Performed by | Raw Monday `user_id` evidence; this identifies the actor and does not replace accountable-owner attribution |
+| Waiting % | Waiting >24h divided by current assigned owner-item relationships |
+| Median wait | Median time since last qualifying activity across current assigned relationships; values marked `≥` are lower bounds truncated by the seven-day window |
+| Activity coverage | Current assigned relationships with at least one qualifying action in the seven-day window, divided by current assigned relationships |
+| Closed / shipped | Unique orders that transitioned to a closed status while in the population during the window |
+| 7-day activity rate (was % acted) | Actioned divided by eligible owner-item relationships (actioned during the window or currently waiting >24h), each relationship counted once |
+| Aging distribution | Current assigned relationships bucketed by order age (Order Date, falling back to creation date); supplier-waiting items excluded |
+| Where work is stuck | Current open work grouped by status with waiting counts, waiting %, median time since activity, and oldest order age |
+| Activity Evidence (was Performed by) | Raw Monday `user_id` evidence; this identifies the actor and does not replace accountable-owner attribution |
+
+Any duration marked `≥` is a lower bound: the report reads seven days of history, so quiet items may have been waiting longer than shown.
+
+### Renames (August 2026 redesign)
+
+Handed off → Moved Onward · Needs attention now → Items Requiring Attention · Performed by → Activity Evidence · % acted → 7-day activity rate. The former "Past 6 wks" scorecard column (order age > 42 days) was replaced by the aging distribution table.
+
+### Data quality card
+
+The report opens with a data quality card counting: current assignments with unmapped ownership, qualifying events by unknown/system users, qualifying events by unresolved user IDs, historical items no longer retrievable, and whether the 10,000-record activity API limit was hit. Unmapped or unresolved entries are not individual performance results.
+
+### Weekly snapshot storage
+
+Delivery-mode runs (not previews or dry runs) persist a weekly snapshot (`buildWeeklySnapshot` in `dynamic-owner-activity-core.js`) via `dynamic-owner-history-store.js` — Redis keys `dynamic:history` / `dynamic:last-run` when `REDIS_URL` is set, otherwise a local `history-dynamic-owner.json` fallback (ephemeral on Render). Retention is 26 weeks. Snapshot failure is non-fatal and logged after the email sends. Trend sections (week-over-week charts, owner trend indicators, true dwell time, return-loop rate) are deferred until enough snapshots accrue.
 
 ## 6. Fact-check recipe
 
@@ -99,4 +118,4 @@ cd C:\Users\efowler\monday-ops
 npm run movement:dynamic-preview
 ```
 
-Render supports manual cron runs from the `weekly-movement-report` service's **Runs** page using **Trigger Run**. The deployed command is `node generate-dynamic-owner-preview.js --send`; it emails the dynamic report. Of the two Monday UTC cron invocations used for daylight-saving coverage, only the one corresponding to 5:00 AM America/Chicago sends. A Trigger Run outside that scheduled window is treated as manual and sends immediately.
+Render supports manual cron runs from the `weekly-movement-report` service's **Runs** page using **Trigger Run**. The deployed command is `node generate-dynamic-owner-preview.js --send`; it emails the dynamic report with subject `Open Order Workflow Movement Report MM/DD/YYYY`. Of the two Monday UTC cron invocations used for daylight-saving coverage, only the one corresponding to 5:00 AM America/Chicago sends. A Trigger Run outside that scheduled window is treated as manual and sends immediately. Delivery runs also store the weekly snapshot (see section 5); confirm `REDIS_URL` is populated on the Render service or snapshots land on the ephemeral disk and are lost.
