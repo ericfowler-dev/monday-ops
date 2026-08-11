@@ -707,7 +707,7 @@ async function sendEmail(html, dateKey) {
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
             message: {
-                subject: `Weekly Open Orders — Movement by Owner — ${formatDateKey(dateKey)}`,
+                subject: `Movement by Owner Report - SNAPs and FS Orders — ${formatDateKey(dateKey)}`,
                 body: { contentType: 'HTML', content: html },
                 toRecipients: recipients.map(address => ({ emailAddress: { address } }))
             },
