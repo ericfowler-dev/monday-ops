@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const {
     normalizeBoardActivityLogs,
     computeDynamicOwnerActivity,
+    buildActionedTrend,
     buildWeeklySnapshot,
     medianOf
 } = require('./dynamic-owner-activity-core');
@@ -268,13 +269,19 @@ test('weekly snapshot captures executive, population, and item state', () => {
     ];
     const result = compute(items, []);
     const snapshot = buildWeeklySnapshot({ result, items, refDate: TO });
-    assert.equal(snapshot.version, 1);
+    assert.equal(snapshot.version, 2);
     assert.equal(snapshot.generatedAt, TO.toISOString());
     assert.equal(snapshot.items.length, 3);
+    assert.equal(snapshot.critical.openCritical, 0);
+    assert.equal(snapshot.closure.closedCount, 0);
     const assigned = snapshot.items.find(entry => entry.id === '1');
     assert.equal(assigned.owner, 'Owner B');
     assert.equal(assigned.waitingLowerBound, true);
     assert.ok(assigned.waitingHours > 0);
+    assert.equal(assigned.isCritical, false);
+    assert.equal(assigned.priority, '');
+    assert.equal(snapshot.populations.fieldService.rows['Owner B'].medianDwellHours, null);
+    assert.deepEqual(snapshot.populations.fieldService.rows['Owner B'].dwellSampleHours, []);
     const supplier = snapshot.items.find(entry => entry.id === '2');
     assert.equal(supplier.owner, null);
     assert.equal(supplier.supplierWaiting, true);
@@ -289,6 +296,93 @@ test('medianOf handles odd, even, and empty inputs', () => {
     assert.equal(medianOf([3, 1, 2]), 2);
     assert.equal(medianOf([1, 2, 3, 4]), 2.5);
     assert.equal(medianOf([]), null);
+});
+
+test('dwell before handoff is tracked per owner with lower bounds at the window edge', () => {
+    const events = [
+        event('status', '2026-08-04T08:00:00.000Z', { previousStatus: 'Dept A', nextStatus: 'Dept B', columnTitle: 'Current Dept / Status' }),
+        event('status', '2026-08-04T18:00:00.000Z', { previousStatus: 'Dept B', nextStatus: 'Dept A', columnTitle: 'Current Dept / Status' })
+    ];
+    const result = compute([item({ status: 'Dept A' })], events);
+    const rows = result.populations.fieldService.rows;
+    // Owner A held the item since before the window (episode pinned to the edge).
+    assert.equal(rows['Owner A'].medianDwellHours, 20);
+    assert.equal(rows['Owner A'].medianDwellLowerBound, true);
+    // Owner B received at 08:00 and handed off at 18:00 — exact 10h dwell.
+    assert.equal(rows['Owner B'].medianDwellHours, 10);
+    assert.equal(rows['Owner B'].medianDwellLowerBound, false);
+    assert.deepEqual(rows['Owner B'].dwellSampleHours, [10]);
+});
+
+test('top actioned owners exclude unmapped rows and handle ties and zero activity', () => {
+    const tie = compute([item()], [
+        event('status', '2026-08-04T08:00:00.000Z', { previousStatus: 'Dept A', nextStatus: 'Dept B', columnTitle: 'Current Dept / Status' }),
+        event('operational', '2026-08-04T15:00:00.000Z', { columnTitle: 'Tracking/DDL #', category: 'shipping' })
+    ]);
+    assert.deepEqual(tie.populations.fieldService.topActionedOwners, ['Owner A', 'Owner B']);
+    const quiet = compute([item({ status: 'Dept A' })], []);
+    assert.deepEqual(quiet.populations.fieldService.topActionedOwners, []);
+    const unmappedOnly = compute([item({ status: 'Mystery Dept' })], [
+        event('operational', '2026-08-04T08:00:00.000Z', { columnTitle: 'Tracking/DDL #', category: 'shipping' })
+    ]);
+    assert.deepEqual(unmappedOnly.populations.fieldService.topActionedOwners, []);
+});
+
+test('critical summary counts open critical lines, ages, and top holders', () => {
+    const items = [
+        item({ id: '1', name: 'Critical 1', status: 'Dept A', isCritical: true, priority: 'Critical', ageDays: 10 }),
+        item({ id: '2', name: 'Critical 2', status: 'Dept A', isCritical: true, priority: 'Critical', ageDays: 30 }),
+        item({ id: '3', name: 'Critical supplier', status: 'Ordered from Supplier', isCritical: true, priority: 'Critical', ageDays: 5 }),
+        item({ id: '4', name: 'Normal', status: 'Dept B', isCritical: false }),
+        item({ id: '5', name: 'Closed critical', status: 'Shipped', isCritical: true, priority: 'Critical', isOpen: false })
+    ];
+    const critical = compute(items, []).critical;
+    assert.equal(critical.openCritical, 3);
+    assert.equal(critical.perPopulation.fieldService, 3);
+    assert.equal(critical.avgAgeDays, 15);
+    assert.deepEqual(critical.topHolders, [{ owner: 'Owner A', count: 2 }]);
+});
+
+test('closure stats measure Date Shipped minus Order Date for orders closed this period', () => {
+    const items = [
+        item({ id: '1', name: 'Shipped 1', status: 'Shipped', isOpen: false, orderDate: new Date('2026-08-01T12:00:00.000Z'), dateShipped: new Date('2026-08-04T12:00:00.000Z') }),
+        item({ id: '2', name: 'Shipped no dates', status: 'Shipped', isOpen: false }),
+        item({ id: '3', name: 'Shipped by date only', status: 'Shipped', isOpen: false, orderDate: new Date('2026-07-31T12:00:00.000Z'), dateShipped: new Date('2026-08-04T12:00:00.000Z') }),
+        item({ id: '4', name: 'Open order', status: 'Dept A' })
+    ];
+    const events = [
+        event('status', '2026-08-04T08:00:00.000Z', { itemId: '1', itemName: 'Shipped 1', previousStatus: 'Dept B', nextStatus: 'Shipped', columnTitle: 'Current Dept / Status' }),
+        event('status', '2026-08-04T09:00:00.000Z', { itemId: '2', itemName: 'Shipped no dates', previousStatus: 'Dept B', nextStatus: 'Shipped', columnTitle: 'Current Dept / Status' })
+    ];
+    const closure = compute(items, events).closure;
+    // Items 1 and 2 closed via transition; item 3 has a Date Shipped inside the
+    // window with no visible transition; item 2 is unmeasurable (no dates).
+    assert.equal(closure.closedCount, 3);
+    assert.equal(closure.measuredCount, 2);
+    assert.equal(closure.avgClosureDays, 3.5);
+    assert.equal(closure.medianClosureDays, 3.5);
+});
+
+test('actioned trend merges populations per person and tolerates v1 snapshots', () => {
+    const currentResult = compute([item()], [
+        event('status', '2026-08-04T08:00:00.000Z', { previousStatus: 'Dept A', nextStatus: 'Dept B', columnTitle: 'Current Dept / Status' })
+    ]);
+    const historyWeeks = {
+        '2026-07-27': { version: 1, populations: { snap: { rows: { 'Owner A': { actioned: 2 } } }, fieldService: { rows: { 'Owner A': { actioned: 1 }, 'Unmapped — check config': { actioned: 9 } } } } },
+        '2026-08-10': { version: 2, populations: { snap: { rows: {} }, fieldService: { rows: { 'Owner B': { actioned: 4 } } } } },
+        '2026-08-03': null
+    };
+    const trend = buildActionedTrend({ historyWeeks, currentWeekKey: '2026-08-17', currentResult, maxWeeks: 8 });
+    assert.deepEqual(trend.weekKeys, ['2026-07-27', '2026-08-10', '2026-08-17']);
+    assert.equal(trend.weeksAvailable, 3);
+    const ownerA = trend.owners.find(row => row.owner === 'Owner A');
+    assert.deepEqual(ownerA.counts, [3, 0, 1]);
+    const ownerB = trend.owners.find(row => row.owner === 'Owner B');
+    assert.deepEqual(ownerB.counts, [0, 4, 0]);
+    assert.equal(trend.maxCount, 4);
+    assert.ok(!trend.owners.some(row => row.owner.includes('Unmapped')));
+    const trimmed = buildActionedTrend({ historyWeeks, currentWeekKey: '2026-08-17', currentResult, maxWeeks: 2 });
+    assert.deepEqual(trimmed.weekKeys, ['2026-08-10', '2026-08-17']);
 });
 
 test('normalizer deduplicates activity, removes same-value edits, and keeps group moves', () => {

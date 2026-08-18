@@ -52,6 +52,8 @@ Those values may be different and are deliberately reported separately.
 
 Undo records, same-value edits, cosmetic edits, notes, and columns outside this allowlist do not qualify.
 
+Priority and Date Shipped are additionally fetched as **values** (for the critical-lines and closure-time stats). Priority is deliberately **not** a qualifying activity column — changing a priority label earns no action credit. Critical lines are items whose Priority matches `CRITICAL_PRIORITY_REGEX` in `weekly-movement-report.config.js` (default `/critical/i`).
+
 ## 4. Attribution rules
 
 | Event | Who receives action credit? | What happens next? |
@@ -72,8 +74,8 @@ An order can credit multiple owners during the same week when each owner acts du
 | Current open | Unique open orders currently in the population, including informational supplier-waiting stages |
 | Received | Distinct owner-item relationships newly assigned during the seven-day window |
 | Actioned | Distinct owner-item relationships with at least one qualifying action during the window |
-| Moved Onward (was Handed off) | Distinct owner-item relationships that transitioned to another owner, outside group, informational stage, or closed stage |
-| Net flow | Received minus Moved Onward; positive means assignments accumulated during the period |
+| Handed off (briefly "Moved Onward"; reverted per stakeholder feedback 8/10) | Distinct owner-item relationships that transitioned to another owner, outside group, informational stage, or closed stage |
+| Net flow | Received minus Handed off; positive means assignments accumulated during the period |
 | Waiting >24h | Current owner has had no qualifying action since receiving/acting on the item for more than 24 hours |
 | Waiting % | Waiting >24h divided by current assigned owner-item relationships |
 | Median wait | Median time since last qualifying activity across current assigned relationships; values marked `≥` are lower bounds truncated by the seven-day window |
@@ -81,14 +83,20 @@ An order can credit multiple owners during the same week when each owner acts du
 | Closed / shipped | Unique orders that transitioned to a closed status while in the population during the window |
 | 7-day activity rate (was % acted) | Actioned divided by eligible owner-item relationships (actioned during the window or currently waiting >24h), each relationship counted once |
 | Aging distribution | Current assigned relationships bucketed by order age (Order Date, falling back to creation date); supplier-waiting items excluded |
-| Where work is stuck | Current open work grouped by status with waiting counts, waiting %, median time since activity, and oldest order age |
-| Activity Evidence (was Performed by) | Raw Monday `user_id` evidence; this identifies the actor and does not replace accountable-owner attribution |
+| Where work is stuck | Current open work grouped by status with waiting counts, waiting %, median time since activity, and oldest order age (top 6 statuses shown) |
+| Critical lines open | Open items in either population whose Priority matches the critical regex; "most critical lines held" credits the accountable owner of the current assignment (supplier-waiting criticals report under Ordered from Supplier) |
+| Avg critical age | Mean order age of open critical lines that have an order/creation date |
+| Avg shipment closure | Mean of (Date Shipped − Order Date, falling back to creation date) across orders closed this period; orders missing either date count as closed but not measurable |
+| Median dwell | Median time an order sat with an owner before they handed it off this week; `≥` marks episodes that began at the window edge |
+| Weekly actioned trend | Per-person actioned counts per stored weekly snapshot (both populations combined), current week appended; hidden until `TREND_MIN_WEEKS` weeks exist, showing at most `TREND_MAX_WEEKS` |
 
 Any duration marked `≥` is a lower bound: the report reads seven days of history, so quiet items may have been waiting longer than shown.
 
-### Renames (August 2026 redesign)
+### Renames and layout (August 2026)
 
-Handed off → Moved Onward · Needs attention now → Items Requiring Attention · Performed by → Activity Evidence · % acted → 7-day activity rate. The former "Past 6 wks" scorecard column (order age > 42 days) was replaced by the aging distribution table.
+The redesign renamed: Needs attention now → Items Requiring Attention · Performed by → Activity Evidence · % acted → 7-day activity rate. The former "Past 6 wks" scorecard column (order age > 42 days) was replaced by the aging distribution table. "Handed off" was briefly renamed "Moved Onward" and then reverted after Ambrea's 8/10 feedback explicitly requested "Owner actioned" / "Handed off" as the two headline numbers.
+
+The 8/10 feedback revision restructured the email: the owner scorecard now shows two numbers per person (Actioned, Handed off) with inline bars and a ★ top-mover highlight; full per-owner metrics moved to "Owner detail" appendix tables (adding Median dwell). Items Requiring Attention collapsed to a one-line callout with the top-3 order deep links. Removed from the email entirely: Owner handoffs, Activity Evidence — performed by, Recent qualifying events, What counted as activity, and the Factory SNAP vs Field Service comparison (the underlying computations remain in `dynamic-owner-activity-core.js` for the console summary and data-quality card). Added: "This week's highlights" (critical lines + closure time) and the "Weekly actioned trend" heat table.
 
 ### Data quality card
 
@@ -96,7 +104,9 @@ The report opens with a data quality card counting: current assignments with unm
 
 ### Weekly snapshot storage
 
-Delivery-mode runs (not previews or dry runs) persist a weekly snapshot (`buildWeeklySnapshot` in `dynamic-owner-activity-core.js`) via `dynamic-owner-history-store.js` — Redis keys `dynamic:history` / `dynamic:last-run` when `REDIS_URL` is set, otherwise a local `history-dynamic-owner.json` fallback (ephemeral on Render). Retention is 26 weeks. Snapshot failure is non-fatal and logged after the email sends. Trend sections (week-over-week charts, owner trend indicators, true dwell time, return-loop rate) are deferred until enough snapshots accrue.
+Delivery-mode runs (not previews or dry runs) persist a weekly snapshot (`buildWeeklySnapshot` in `dynamic-owner-activity-core.js`) via `dynamic-owner-history-store.js` — Redis keys `dynamic:history` / `dynamic:last-run` when `REDIS_URL` is set, otherwise a local `history-dynamic-owner.json` fallback (ephemeral on Render). Retention is 26 weeks. Snapshot failure is non-fatal and logged after the email sends.
+
+Snapshot **v2** (8/2026 feedback revision) adds: per-item `priority`/`isCritical`, per-owner `medianDwellHours`/`medianDwellLowerBound`/`dwellSampleHours`, and top-level `critical`/`closure` blocks. Trend readers tolerate v1 weeks (missing fields read as absent). The report now also **reads** history at render time to build the Weekly actioned trend — verify `REDIS_URL` is populated on the Render service or the trend never accumulates. Multi-week dwell medians and return-loop rate remain deferred until enough v2 snapshots accrue.
 
 ## 6. Fact-check recipe
 

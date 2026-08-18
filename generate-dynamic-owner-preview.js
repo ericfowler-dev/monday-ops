@@ -3,7 +3,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const config = require('./weekly-movement-report.config');
-const { normalizeBoardActivityLogs, computeDynamicOwnerActivity, buildWeeklySnapshot } = require('./dynamic-owner-activity-core');
+const { normalizeBoardActivityLogs, computeDynamicOwnerActivity, buildWeeklySnapshot, buildActionedTrend } = require('./dynamic-owner-activity-core');
 const { pruneWeeks } = require('./weekly-movement-core');
 const { createHistoryStore } = require('./dynamic-owner-history-store');
 
@@ -12,6 +12,15 @@ const WINDOW_DAYS = 7;
 const WAITING_HOURS = 24;
 const ACTIVITY_LIMIT = 10000;
 const FONT = "'Segoe UI',Arial,sans-serif";
+
+// Columns fetched as values for every item (activity logs cover the rest).
+const ITEM_COLUMN_IDS = [
+    config.COL_IDS.ORDER_TYPE,
+    config.COL_IDS.CURRENT_STATUS,
+    config.COL_IDS.ORDER_DATE,
+    config.COL_IDS.PRIORITY,
+    config.COL_IDS.DATE_SHIPPED
+];
 
 // Deliberately narrow: these fields represent a meaningful workflow action.
 // Cosmetic edits, notes, and passive automations do not earn owner credit.
@@ -76,6 +85,7 @@ async function generateReport() {
         pastDueDays: config.PAST_DUE_DAYS
     });
 
+    const historyWeeks = await readHistoryWeeks();
     const html = renderHtml({
         now,
         fromDate,
@@ -83,6 +93,8 @@ async function generateReport() {
         events,
         items,
         userNames,
+        historyWeeks,
+        currentWeekKey: formatDateKey(now),
         send: deliveryMode,
         activityLimitReached: rawLogs.length >= ACTIVITY_LIMIT,
         rawLogCount: rawLogs.length
@@ -112,6 +124,22 @@ async function persistSnapshot(result, items, now) {
         console.log(`Weekly snapshot ${dateKey} stored via ${store.kind} (${Object.keys(history.weeks).length} weeks retained).`);
     } catch (error) {
         console.error(`Snapshot storage failed (report already sent): ${error.message}`);
+    } finally {
+        if (store) await store.close().catch(() => {});
+    }
+}
+
+// Trend data is best-effort: environments without Redis (or with an empty local
+// fallback file) simply render the "history accruing" placeholder.
+async function readHistoryWeeks() {
+    let store;
+    try {
+        store = await createHistoryStore();
+        const history = await store.readHistory();
+        return history && history.weeks ? history.weeks : {};
+    } catch (error) {
+        console.error(`History read failed (trend section will show its placeholder): ${error.message}`);
+        return {};
     } finally {
         if (store) await store.close().catch(() => {});
     }
@@ -152,7 +180,7 @@ async function mondayQuery(query, variables = {}) {
 async function fetchCurrentRelevantItems() {
     const result = [];
     const relevantGroups = new Set([config.SNAP_GROUP_ID, config.FIELD_SERVICE_GROUP_ID]);
-    const columnIds = [config.COL_IDS.ORDER_TYPE, config.COL_IDS.CURRENT_STATUS, config.COL_IDS.ORDER_DATE];
+    const columnIds = ITEM_COLUMN_IDS;
     let cursor = null;
     do {
         const data = await mondayQuery(`query ($boardIds: [ID!], $cursor: String, $columnIds: [String!]) {
@@ -174,7 +202,7 @@ async function fetchCurrentRelevantItems() {
 
 async function fetchItemsById(ids) {
     const result = [];
-    const columnIds = [config.COL_IDS.ORDER_TYPE, config.COL_IDS.CURRENT_STATUS, config.COL_IDS.ORDER_DATE];
+    const columnIds = ITEM_COLUMN_IDS;
     for (let offset = 0; offset < ids.length; offset += 100) {
         const data = await mondayQuery(`query ($itemIds: [ID!], $columnIds: [String!]) {
             items(ids: $itemIds, limit: 100) {
@@ -216,6 +244,7 @@ function mapItem(raw, now) {
         ? 'fieldService'
         : groupId === config.SNAP_GROUP_ID && isSnapOrder ? 'snap' : null;
     const isClosed = config.CLOSED_CURRENT_STATUSES.some(value => value.toLowerCase() === status.toLowerCase());
+    const priority = columns[config.COL_IDS.PRIORITY] || '';
     return {
         id: String(raw.id),
         name: raw.name,
@@ -226,6 +255,10 @@ function mapItem(raw, now) {
         orderType,
         status,
         createdAt,
+        orderDate,
+        dateShipped: parseMondayDate(columns[config.COL_IDS.DATE_SHIPPED]),
+        priority,
+        isCritical: config.CRITICAL_PRIORITY_REGEX.test(priority),
         ageDays: daysBetween(orderDate || createdAt, now),
         isOpen: raw.state === 'active' && !isClosed,
         url: `https://${config.MONDAY_SLUG}.monday.com/boards/${config.BOARD_ID}/pulses/${raw.id}`
@@ -245,21 +278,21 @@ function renderHtml(data) {
       </td></tr>
       ${renderDataQuality(result, data)}
       ${renderExecutiveSummary(result.executive)}
-      ${renderBottleneck(result.populations)}
-      ${renderAgingBuckets(result.populations)}
-      ${renderComparison(result.populations)}
+      ${renderHighlights(result.critical, result.closure)}
       ${renderPopulation('Part 1 — Factory SNAP orders', '#2563eb', '#eff6ff', result.populations.snap)}
       ${renderPopulation('Part 2 — Field Service orders', '#0f766e', '#f0fdfa', result.populations.fieldService)}
-      ${renderActorSection(result.actorRows, data.userNames)}
-      ${renderActivityEvidence(data.events, data.items, data.userNames, result.eventAttributions)}
-      ${renderBreakdown(result.breakdownRows)}
-      <tr><td style="padding:16px 28px 6px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
-        ${principle('Accountability', 'Credit follows the department owner responsible when the action occurred.')}
-        ${principle('Activity', 'Status, fulfillment, supplier, and shipping changes qualify—not cosmetic edits.')}
-        ${principle('Exceptions', '“Waiting” means the current owner has had no qualifying action for 24+ hours.')}
-      </tr></table></td></tr>
+      ${renderOwnerTrend(buildActionedTrend({
+          historyWeeks: data.historyWeeks,
+          currentWeekKey: data.currentWeekKey,
+          currentResult: result,
+          maxWeeks: config.TREND_MAX_WEEKS
+      }))}
+      ${renderBottleneck(result.populations)}
+      ${renderAgingBuckets(result.populations)}
+      ${renderOwnerDetail('Factory SNAP', result.populations.snap)}
+      ${renderOwnerDetail('Field Service', result.populations.fieldService)}
       <tr><td style="padding:19px 28px;background:#e8eef8;color:#475569;font-size:11px;line-height:17px">
-        <b>How totals work:</b> Owner metrics count distinct owner–item relationships (owner–item pairs), so one order can credit Dept A and Dept B after a handoff; “Current open” counts unique orders. A status transition credits the owner of the status being left; the destination owner receives the item. Draft-group activity appears under “Activity Evidence” but creates no owner credit until the item enters SNAP or Field Service. Waiting durations marked with “≥” are lower bounds because this report reads seven days of history; the waiting threshold itself is 24 hours.${data.send ? '' : ' Preview only: no email was sent and no history was stored.'}
+        <b>How to read this report:</b> Owner metrics count distinct owner–item relationships (owner–item pairs), so one order can credit two owners after a handoff; “Current open” counts unique orders. Credit follows the accountable department owner — status, fulfillment, supplier, and shipping changes qualify, cosmetic edits do not. “Waiting” means no qualifying action for 24+ hours; durations marked “≥” are lower bounds because the report reads seven days of history. Click any order name to open it in monday.com.${data.send ? '' : ' Preview only: no email was sent and no history was stored.'}
       </td></tr>
     </table></td></tr></table></body></html>`;
 }
@@ -287,8 +320,8 @@ function renderExecutiveSummary(executive) {
     <tr><td style="padding:0 24px 6px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
       ${metric('Current open', executive.currentOpenOrders, `${executive.snapOpen} SNAP · ${executive.fieldOpen} Field · ${executive.supplierWaiting} supplier-waiting`, '#2563eb', '16.66%')}
       ${metric('Received', executive.received, 'owner–item pairs', '#7c3aed', '16.66%')}
-      ${metric('Moved Onward', executive.movedOnward, 'owner–item pairs', '#0369a1', '16.66%')}
-      ${metric('Net flow', signed(executive.netFlow), 'received − moved onward', netColor, '16.66%')}
+      ${metric('Handed off', executive.movedOnward, 'owner–item pairs', '#0369a1', '16.66%')}
+      ${metric('Net flow', signed(executive.netFlow), 'received − handed off', netColor, '16.66%')}
       ${metric('Waiting >24h', executive.waiting, `${pctLabel(executive.waitingPct)} of assigned work`, executive.waiting ? '#b91c1c' : '#64748b', '16.66%')}
       ${metric('Activity coverage', pctLabel(executive.activityCoverage), 'assigned items with 7-day activity', '#15803d', '16.66%')}
     </tr></table></td></tr>`;
@@ -298,12 +331,13 @@ function renderBottleneck(populations) {
     const combined = [
         ...populations.snap.statusBottlenecks.map(row => ({ ...row, populationLabel: 'Factory SNAP' })),
         ...populations.fieldService.statusBottlenecks.map(row => ({ ...row, populationLabel: 'Field Service' }))
-    ].sort((a, b) => b.waiting - a.waiting || b.currentCount - a.currentCount || a.status.localeCompare(b.status));
+    ].sort((a, b) => b.waiting - a.waiting || b.currentCount - a.currentCount || a.status.localeCompare(b.status))
+        .slice(0, 6);
     const rows = combined.map(row => {
         const median = row.medianSinceActivityHours === null ? '—' : `${row.medianLowerBound ? '≥' : ''}${formatDuration(row.medianSinceActivityHours)}`;
         return `<tr><td style="${td()}font-weight:700">${escapeHtml(row.status)}</td><td style="${td()}">${escapeHtml(row.populationLabel)}</td><td align="right" style="${td()}">${row.currentCount}</td><td align="right" style="${td()}font-weight:800;color:${row.waiting ? '#b91c1c' : '#94a3b8'}">${dash(row.waiting)}</td><td align="right" style="${td()}">${pctLabel(row.waitingPct)}</td><td align="right" style="${td()}">${median}</td><td align="right" style="${td()}">${row.oldestAgeDays === null ? '—' : `${row.oldestAgeDays}d`}</td><td align="center" style="${td()}">${row.supplierWaiting ? 'Yes' : '—'}</td></tr>`;
     }).join('');
-    return `${sectionTitle('Where work is stuck', 'Current open work grouped by workflow status, sorted by waiting count. Supplier rows carry no owner, so waiting stats do not apply.')}
+    return `${sectionTitle('Where work is stuck', 'Top workflow statuses by waiting count (top 6 shown). Supplier rows carry no owner, so waiting stats do not apply.')}
     <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#12213f"><th align="left" style="${th()}">Status</th><th align="left" style="${th()}">Population</th><th align="right" style="${th()}">Current</th><th align="right" style="${th()}">Waiting &gt;24h</th><th align="right" style="${th()}">Waiting %</th><th align="right" style="${th()}">Median since activity</th><th align="right" style="${th()}">Oldest (age)</th><th align="center" style="${th()}">Supplier</th></tr>${rows || emptyRow(8, 'No current open work.')}</table></td></tr>`;
 }
 
@@ -311,119 +345,123 @@ function renderAgingBuckets(populations) {
     const snap = populations.snap.agingBuckets;
     const field = populations.fieldService.agingBuckets;
     const total = snap.total + field.total;
+    const maxCombined = Math.max(1, ...snap.buckets.map((bucket, index) => bucket.count + field.buckets[index].count));
     const rows = snap.buckets.map((bucket, index) => {
         const fieldBucket = field.buckets[index];
         const combined = bucket.count + fieldBucket.count;
         const pct = total ? Math.round(combined / total * 100) : null;
-        return `<tr><td style="${td()}font-weight:700">${escapeHtml(bucket.label)}</td><td align="right" style="${td()}">${dash(bucket.count)}</td><td align="right" style="${td()}">${dash(fieldBucket.count)}</td><td align="right" style="${td()}font-weight:800">${dash(combined)}</td><td align="right" style="${td()}">${pctLabel(pct)}</td></tr>`;
+        const barColor = index >= 3 ? '#b91c1c' : index >= 2 ? '#ea580c' : '#2563eb';
+        return `<tr><td style="${td()}font-weight:700">${escapeHtml(bucket.label)}</td><td style="${td()}">${bar(combined, maxCombined, barColor)}</td><td align="right" style="${td()}">${dash(bucket.count)}</td><td align="right" style="${td()}">${dash(fieldBucket.count)}</td><td align="right" style="${td()}font-weight:800">${dash(combined)}</td><td align="right" style="${td()}">${pctLabel(pct)}</td></tr>`;
     }).join('');
     const unknown = snap.unknownAge + field.unknownAge;
-    const unknownRow = unknown ? `<tr><td style="${td()}color:#64748b">Age unknown (no order date)</td><td align="right" style="${td()}">${dash(snap.unknownAge)}</td><td align="right" style="${td()}">${dash(field.unknownAge)}</td><td align="right" style="${td()}font-weight:800">${unknown}</td><td align="right" style="${td()}">${pctLabel(total ? Math.round(unknown / total * 100) : null)}</td></tr>` : '';
+    const unknownRow = unknown ? `<tr><td style="${td()}color:#64748b">Age unknown (no order date)</td><td style="${td()}"></td><td align="right" style="${td()}">${dash(snap.unknownAge)}</td><td align="right" style="${td()}">${dash(field.unknownAge)}</td><td align="right" style="${td()}font-weight:800">${unknown}</td><td align="right" style="${td()}">${pctLabel(total ? Math.round(unknown / total * 100) : null)}</td></tr>` : '';
     return `${sectionTitle('Aging distribution', 'Currently assigned work bucketed by order age (order date, falling back to creation date). Supplier-waiting items are excluded.')}
-    <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">Order age</th><th align="right" style="${lightTh()}">Factory SNAP</th><th align="right" style="${lightTh()}">Field Service</th><th align="right" style="${lightTh()}">Total</th><th align="right" style="${lightTh()}">% of assigned</th></tr>${rows}${unknownRow}</table></td></tr>`;
+    <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">Order age</th><th align="left" style="${lightTh()}width:170px"></th><th align="right" style="${lightTh()}">Factory SNAP</th><th align="right" style="${lightTh()}">Field Service</th><th align="right" style="${lightTh()}">Total</th><th align="right" style="${lightTh()}">% of assigned</th></tr>${rows}${unknownRow}</table></td></tr>`;
 }
 
-function renderComparison(populations) {
-    const metrics = [
-        ['Current open (unique orders)', pop => dash(pop.currentOpen)],
-        ['Supplier waiting', pop => dash(pop.informationalOpen)],
-        ['Waiting >24h (owner–item pairs)', pop => dash(pop.totals.waiting)],
-        ['Waiting % of assigned', pop => pctLabel(pop.totals.waitingPct)],
-        ['Received', pop => dash(pop.totals.received)],
-        ['Moved Onward', pop => dash(pop.totals.handedOff)],
-        ['Net flow', pop => signed(pop.totals.netFlow)],
-        ['Median wait', pop => pop.totals.medianWaitHours === null ? '—' : `${pop.totals.medianWaitLowerBound ? '≥' : ''}${formatDuration(pop.totals.medianWaitHours)}`],
-        ['7-day activity coverage', pop => pctLabel(pop.totals.activityCoverage)],
-        ['Closed / shipped this period', pop => dash(pop.closedOrders)]
-    ];
-    const rows = metrics.map(([label, valueFor]) => `<tr><td style="${td()}font-weight:700">${escapeHtml(label)}</td><td align="right" style="${td()}">${valueFor(populations.snap)}</td><td align="right" style="${td()}">${valueFor(populations.fieldService)}</td></tr>`).join('');
-    return `${sectionTitle('Factory SNAP vs Field Service', 'Side-by-side comparison of the two workflow populations for this reporting period.')}
-    <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#12213f"><th align="left" style="${th()}">Metric</th><th align="right" style="${th()}">Factory SNAP</th><th align="right" style="${th()}">Field Service</th></tr>${rows}</table></td></tr>`;
+function renderHighlights(critical, closure) {
+    const holders = critical.topHolders;
+    const holderNote = holders.length
+        ? `${holders.map(entry => entry.owner).join(' · ')} (${holders[0].count} line${holders[0].count === 1 ? '' : 's'} each)`
+        : 'no open critical lines';
+    return `${sectionTitle('This week’s highlights', 'Critical lines carry a Critical priority on the board. Closure time is Date Shipped minus Order Date for orders closed this period.')}
+    <tr><td style="padding:0 24px 6px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+      ${metric('Critical lines open', critical.openCritical, `${critical.perPopulation.snap} SNAP · ${critical.perPopulation.fieldService} Field Service`, critical.openCritical ? '#b91c1c' : '#64748b', '25%')}
+      ${metric('Avg critical age', critical.avgAgeDays === null ? '—' : `${critical.avgAgeDays}d`, critical.openCritical ? `across ${critical.agedCount} critical line${critical.agedCount === 1 ? '' : 's'} with dates` : 'no open critical lines', critical.openCritical ? '#ea580c' : '#64748b', '25%')}
+      ${metric('Most critical lines held', holders.length ? holders[0].count : '—', holderNote, holders.length ? '#b91c1c' : '#64748b', '25%')}
+      ${metric('Avg shipment closure', closure.avgClosureDays === null ? '—' : `${closure.avgClosureDays}d`, `${closure.measuredCount} of ${closure.closedCount} closed order${closure.closedCount === 1 ? '' : 's'} measurable`, '#15803d', '25%')}
+    </tr></table></td></tr>`;
 }
 
 function renderPopulation(title, color, background, population) {
-    const rows = Object.entries(population.rows)
-        .sort((a, b) => b[1].waiting - a[1].waiting || b[1].current - a[1].current || b[1].actioned - a[1].actioned || a[0].localeCompare(b[0]));
-    const body = rows.map(([owner, row]) => ownerRow(owner, row)).join('');
     const totals = population.totals;
+    const topOwners = new Set(population.topActionedOwners || []);
+    const rows = Object.entries(population.rows)
+        .sort((a, b) => b[1].actioned - a[1].actioned || b[1].handedOff - a[1].handedOff || a[0].localeCompare(b[0]));
+    const maxValue = Math.max(1, ...rows.map(([, row]) => Math.max(row.actioned, row.handedOff)));
+    const body = rows.map(([owner, row]) => scoreRow(owner, row, topOwners.has(owner), maxValue)).join('');
     return `<tr><td style="padding:20px 28px 13px;background:${background};border-top:5px solid ${color}">
-      <div style="font-size:20px;font-weight:800">${escapeHtml(title)}</div><div style="margin-top:4px;font-size:12px;color:#526078">Current load plus activity credited to each owner during the reporting window</div>
+      <div style="font-size:20px;font-weight:800">${escapeHtml(title)}</div><div style="margin-top:4px;font-size:12px;color:#526078">Who moved work this week — full per-owner metrics are in the owner detail tables at the end</div>
     </td></tr>
     <tr><td style="padding:14px 24px 6px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
       ${metric('Current open', population.currentOpen, `${population.informationalOpen} supplier-waiting`, color)}
       ${metric('Received', totals.received, 'owner–item pairs', '#7c3aed')}
-      ${metric('Moved Onward', totals.handedOff, 'owner–item pairs', '#0369a1')}
-      ${metric('Net flow', signed(totals.netFlow), 'received − moved onward', totals.netFlow > 0 ? '#b91c1c' : totals.netFlow < 0 ? '#15803d' : '#64748b')}
+      ${metric('Handed off', totals.handedOff, 'owner–item pairs', '#0369a1')}
       ${metric('Waiting >24h', totals.waiting, `${pctLabel(totals.waitingPct)} of assigned`, totals.waiting ? '#b91c1c' : '#64748b')}
+      ${metric('Closed / shipped', population.closedOrders, 'this period', '#15803d')}
     </tr></table></td></tr>
-    ${sectionTitle('Owner scorecard', 'Owner–item pairs. Actioned may overlap Waiting when an owner acted earlier in the week but the item has since gone quiet.')}
-    <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed">
-      <tr style="background:#12213f"><th align="left" style="${th()}">Accountable owner</th><th align="right" style="${th()}">Current</th><th align="right" style="${th()}">Received</th><th align="right" style="${th()}">Actioned</th><th align="right" style="${th()}">Moved Onward</th><th align="right" style="${th()}">Net flow</th><th align="right" style="${th()}">Waiting &gt;24h</th><th align="right" style="${th()}">Waiting %</th><th align="right" style="${th()}">Median wait</th><th align="right" style="${th()}">Oldest waiting</th><th align="right" style="${th()}">7-day activity</th></tr>
-      ${body || emptyRow(11, 'No matching owner activity.')}${body ? totalRow(totals) : ''}
+    ${sectionTitle('Owner scorecard', 'Two numbers per person: orders they actioned and orders they handed onward this week. ★ marks the top mover.')}
+    <tr><td style="padding:0 28px 10px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed">
+      <tr style="background:#12213f"><th align="left" style="${th()}">Accountable owner</th><th align="right" style="${th()}width:60px">Actioned</th><th align="left" style="${th()}width:160px"></th><th align="right" style="${th()}width:70px">Handed off</th><th align="left" style="${th()}width:160px"></th></tr>
+      ${body || emptyRow(5, 'No matching owner activity.')}
     </table></td></tr>
-    ${renderAttention(population.attention)}${renderHandoffs(population.handoffs)}`;
+    ${renderAttentionCallout(population.attention)}`;
 }
 
-function ownerRow(owner, row) {
-    const oldest = row.oldestWaitingHours === null ? '—' : `${row.oldestWaitingLowerBound ? '≥' : ''}${formatDuration(row.oldestWaitingHours)}`;
-    const median = row.medianWaitHours === null ? '—' : `${row.medianWaitLowerBound ? '≥' : ''}${formatDuration(row.medianWaitHours)}`;
-    return `<tr><td style="${td()}font-weight:700">${escapeHtml(owner)}</td><td align="right" style="${td()}">${dash(row.current)}</td><td align="right" style="${td()}">${dash(row.received)}</td><td align="right" style="${td()}font-weight:800;color:#15803d">${dash(row.actioned)}</td><td align="right" style="${td()}">${dash(row.handedOff)}</td><td align="right" style="${td()}color:${row.netFlow > 0 ? '#b91c1c' : row.netFlow < 0 ? '#15803d' : '#94a3b8'}">${signed(row.netFlow)}</td><td align="right" style="${td()}font-weight:800;color:${row.waiting ? '#b91c1c' : '#94a3b8'}">${dash(row.waiting)}</td><td align="right" style="${td()}">${pctLabel(row.waitingPct)}</td><td align="right" style="${td()}">${median}</td><td align="right" style="${td()}">${oldest}</td><td align="right" style="${td()}font-weight:800">${row.actionRate === null ? '—' : `${row.actionRate}%`}</td></tr>`;
+function scoreRow(owner, row, isTop, maxValue) {
+    const highlight = isTop ? 'background:#ecfdf5;' : '';
+    const badge = isTop ? ' <span style="font-size:10px;font-weight:800;color:#047857;letter-spacing:.5px">★ TOP MOVER</span>' : '';
+    return `<tr${isTop ? ' bgcolor="#ecfdf5"' : ''}><td style="${td()}${highlight}font-weight:700">${escapeHtml(owner)}${badge}</td><td align="right" style="${td()}${highlight}font-weight:800;font-size:14px;color:#15803d">${dash(row.actioned)}</td><td style="${td()}${highlight}">${bar(row.actioned, maxValue, '#15803d')}</td><td align="right" style="${td()}${highlight}font-weight:800;font-size:14px;color:#0369a1">${dash(row.handedOff)}</td><td style="${td()}${highlight}">${bar(row.handedOff, maxValue, '#0369a1')}</td></tr>`;
 }
 
-function totalRow(row) {
-    const median = row.medianWaitHours === null ? '—' : `${row.medianWaitLowerBound ? '≥' : ''}${formatDuration(row.medianWaitHours)}`;
-    return `<tr style="background:#f7f9fc"><td style="${td()}font-weight:800">Total owner–item pairs</td><td align="right" style="${td()}font-weight:800">${row.current}</td><td align="right" style="${td()}font-weight:800">${row.received}</td><td align="right" style="${td()}font-weight:800">${row.actioned}</td><td align="right" style="${td()}font-weight:800">${row.handedOff}</td><td align="right" style="${td()}font-weight:800">${signed(row.netFlow)}</td><td align="right" style="${td()}font-weight:800">${row.waiting}</td><td align="right" style="${td()}font-weight:800">${pctLabel(row.waitingPct)}</td><td align="right" style="${td()}font-weight:800">${median}</td><td style="${td()}"></td><td align="right" style="${td()}font-weight:800">${row.actionRate === null ? '—' : `${row.actionRate}%`}</td></tr>`;
+function renderAttentionCallout(items) {
+    if (!items.length) {
+        return `<tr><td style="padding:0 28px 20px"><div style="padding:9px 13px;background:#f0fdf4;border:1px solid #86efac;color:#166534;font-size:12px">No orders waiting more than 24 hours.</div></td></tr>`;
+    }
+    const links = items.slice(0, 3).map(item =>
+        `<a href="${escapeHtml(item.url)}" style="color:#1d4ed8;text-decoration:none;font-weight:700">${escapeHtml(item.name)}</a> (${item.waitingLowerBound ? '≥' : ''}${formatDuration(item.waitingHours)}, ${escapeHtml(item.owner)})`).join(' · ');
+    return `<tr><td style="padding:0 28px 20px"><div style="padding:9px 13px;background:#fff7ed;border:1px solid #fdba74;color:#9a3412;font-size:12px;line-height:19px"><b>${items.length} order${items.length === 1 ? '' : 's'} waiting &gt;24h.</b> Longest: ${links}. Click an order to open it in monday.com.</div></td></tr>`;
 }
 
-function renderAttention(items) {
-    const rows = items.slice(0, 15).map(item => `<tr><td style="${td()}"><a href="${escapeHtml(item.url)}" style="color:#1d4ed8;text-decoration:none;font-weight:700">${escapeHtml(item.name)}</a></td><td style="${td()}">${escapeHtml(item.owner)}</td><td style="${td()}">${escapeHtml(item.status)}</td><td align="right" style="${td()}font-weight:800;color:#b91c1c">${item.waitingLowerBound ? '≥' : ''}${formatDuration(item.waitingHours)}</td><td align="right" style="${td()}">${item.ageDays === null ? '—' : `${item.ageDays}d`}</td><td style="${td()}color:#526078">${escapeHtml((item.reasons || []).join('; '))}</td></tr>`).join('');
-    return `${sectionTitle('Items Requiring Attention', 'Current-owner exceptions sorted by longest time since qualifying action (top 15 shown).')}
-    <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">Order</th><th align="left" style="${lightTh()}">Current owner</th><th align="left" style="${lightTh()}">Current status</th><th align="right" style="${lightTh()}">Waiting</th><th align="right" style="${lightTh()}">Order age</th><th align="left" style="${lightTh()}">Reason flagged</th></tr>${rows || emptyRow(6, 'No items have been waiting more than 24 hours.')}</table></td></tr>`;
+// Outlook's Word renderer ignores CSS widths on divs but honors width/bgcolor
+// attributes on table cells, so bars are rendered as single-cell tables.
+function bar(value, max, color, maxPx = 140) {
+    if (!value) return '';
+    const px = Math.max(3, Math.round(value / max * maxPx));
+    return `<table role="presentation" cellpadding="0" cellspacing="0"><tr><td width="${px}" height="10" bgcolor="${color}" style="font-size:0;line-height:0">&nbsp;</td></tr></table>`;
 }
 
-function renderHandoffs(handoffs) {
-    const rows = handoffs.slice(0, 8).map(row => `<tr><td style="${td()}">${escapeHtml(row.source)}</td><td style="${td()}">→ ${escapeHtml(row.destination)}</td><td align="right" style="${td()}font-weight:800">${row.distinctItems}</td><td align="right" style="${td()}">${row.events}</td></tr>`).join('');
-    return `${sectionTitle('Owner handoffs', 'The same order can create action credit for each owner who performs their part.')}
-    <tr><td style="padding:0 28px 20px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">From</th><th align="left" style="${lightTh()}">To</th><th align="right" style="${lightTh()}">Orders</th><th align="right" style="${lightTh()}">Transitions</th></tr>${rows || emptyRow(4, 'No owner handoffs in this window.')}</table></td></tr>`;
+function renderOwnerTrend(trend) {
+    const subtitle = 'Orders actioned per person per week, both populations combined. Darker cells mean more actions.';
+    if (trend.weeksAvailable < config.TREND_MIN_WEEKS) {
+        return `${sectionTitle('Weekly actioned trend', subtitle)}
+        <tr><td style="padding:0 28px 18px"><div style="padding:11px 14px;background:#f8fafc;border:1px dashed #cbd5e1;color:#64748b;font-size:12px">The per-person weekly trend will appear here once at least ${config.TREND_MIN_WEEKS} weeks of history have accrued (currently ${trend.weeksAvailable}). History is stored each time the report is delivered.</div></td></tr>`;
+    }
+    const headers = trend.weekKeys.map(key => `<th align="center" style="${lightTh()}">${escapeHtml(weekLabel(key))}</th>`).join('');
+    const body = trend.owners.map(row => {
+        const cells = row.counts.map(count => {
+            const [background, color] = heatColors(count, trend.maxCount);
+            return `<td align="center" bgcolor="${background}" style="${td()}background:${background};color:${color};font-weight:800">${count || '·'}</td>`;
+        }).join('');
+        return `<tr><td style="${td()}font-weight:700">${escapeHtml(row.owner)}</td>${cells}<td align="right" style="${td()}font-weight:800">${row.total}</td></tr>`;
+    }).join('');
+    return `${sectionTitle('Weekly actioned trend', subtitle)}
+    <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">Owner</th>${headers}<th align="right" style="${lightTh()}">Total</th></tr>${body || emptyRow(trend.weekKeys.length + 2, 'No owner activity recorded yet.')}</table></td></tr>`;
 }
 
-function renderActorSection(actorRows, names) {
-    const rows = actorRows.slice(0, 20).map(row => `<tr><td style="${td()}font-weight:700">${escapeHtml(names.get(row.userId) || `User ${row.userId}`)}</td><td align="right" style="${td()}">${row.distinctItems}</td><td align="right" style="${td()}">${row.statusChanges}</td><td align="right" style="${td()}">${row.operationalEdits}</td><td align="right" style="${td()}">${row.groupMoves}</td><td align="right" style="${td()}font-weight:800">${row.events}</td></tr>`).join('');
-    return `<tr><td style="padding:20px 28px 13px;background:#fff7ed;border-top:5px solid #ea580c"><div style="font-size:20px;font-weight:800">Activity Evidence — performed by</div><div style="margin-top:4px;font-size:12px;color:#7c2d12">This identifies who physically made the change. It is deliberately separate from the accountable owner scorecard and is not an owner accountability metric.</div></td></tr>
-    <tr><td style="padding:18px 28px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#12213f"><th align="left" style="${th()}">Person</th><th align="right" style="${th()}">Orders touched</th><th align="right" style="${th()}">Status</th><th align="right" style="${th()}">Operational fields</th><th align="right" style="${th()}">Group moves</th><th align="right" style="${th()}">Events</th></tr>${rows || emptyRow(6, 'No qualifying activity.')}</table></td></tr>`;
+function heatColors(count, max) {
+    if (!count) return ['#ffffff', '#94a3b8'];
+    const step = Math.min(3, Math.ceil(count / Math.max(1, max) * 3));
+    return [['#ccfbf1', '#115e59'], ['#5eead4', '#134e4a'], ['#0d9488', '#ffffff']][step - 1];
 }
 
-function renderActivityEvidence(events, items, names, attributions) {
-    const itemMap = new Map(items.map(item => [item.id, item]));
-    const attributionMap = new Map(attributions.map(row => [row.eventId, row]));
-    const rows = [...events].sort((a, b) => b.at - a.at).slice(0, 30)
-        .map(event => evidenceRow(event, itemMap.get(event.itemId), names, attributionMap.get(event.id), true)).join('');
-    return `${sectionTitle('Recent qualifying events', 'A concrete audit trail for validating how the report interprets Monday activity (latest 30 shown).')}
-    <tr><td style="padding:0 28px 20px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">When</th><th align="left" style="${lightTh()}">Order</th><th align="left" style="${lightTh()}">Performed by</th><th align="left" style="${lightTh()}">Field</th><th align="left" style="${lightTh()}">Change</th><th align="left" style="${lightTh()}">Owner credit</th></tr>${rows || emptyRow(6, 'No qualifying events.')}</table></td></tr>`;
+function weekLabel(key) {
+    const match = String(key).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return match ? `${Number(match[2])}/${Number(match[3])}` : String(key);
 }
 
-function evidenceRow(event, item, names, attribution, showItem) {
-    const action = event.type === 'status'
-        ? `${event.previousStatus} → ${event.nextStatus}`
-        : event.type === 'group_move'
-            ? `${event.sourceGroupName || event.sourceGroupId || 'Outside'} → ${event.destinationGroupName || event.destinationGroupId || 'Outside'}`
-            : `${event.previousValue || 'blank'} → ${event.nextValue || 'blank'}`;
-    const credit = attribution?.creditOwner
-        ? attribution.receivedOwner && attribution.receivedOwner !== attribution.creditOwner
-            ? `${attribution.creditOwner}; received by ${attribution.receivedOwner}`
-            : attribution.creditOwner
-        : attribution?.receivedOwner ? `Received by ${attribution.receivedOwner}` : 'None — outside report group';
-    const itemCell = showItem ? `<td style="${td()}">${item ? `<a href="${escapeHtml(item.url)}" style="color:#1d4ed8;text-decoration:none;font-weight:700">${escapeHtml(item.name)}</a>` : escapeHtml(event.itemName || event.itemId)}</td>` : '';
-    return `<tr><td style="${td()}white-space:nowrap">${escapeHtml(formatDateTime(event.at))}</td>${itemCell}<td style="${td()}">${escapeHtml(names.get(event.actorUserId) || `User ${event.actorUserId}`)}</td><td style="${td()}">${escapeHtml(event.type === 'group_move' ? 'Moved between groups' : event.columnTitle)}</td><td style="${td()}color:#526078">${escapeHtml(action)}</td><td style="${td()}font-weight:700;color:${attribution?.creditOwner ? '#15803d' : '#64748b'}">${escapeHtml(credit)}</td></tr>`;
+function renderOwnerDetail(label, population) {
+    const rows = Object.entries(population.rows)
+        .sort((a, b) => b[1].current - a[1].current || b[1].actioned - a[1].actioned || a[0].localeCompare(b[0]));
+    const body = rows.map(([owner, row]) => {
+        const median = row.medianWaitHours === null ? '—' : `${row.medianWaitLowerBound ? '≥' : ''}${formatDuration(row.medianWaitHours)}`;
+        const dwell = row.medianDwellHours === null ? '—' : `${row.medianDwellLowerBound ? '≥' : ''}${formatDuration(row.medianDwellHours)}`;
+        const oldest = row.oldestWaitingHours === null ? '—' : `${row.oldestWaitingLowerBound ? '≥' : ''}${formatDuration(row.oldestWaitingHours)}`;
+        return `<tr><td style="${td()}font-weight:700">${escapeHtml(owner)}</td><td align="right" style="${td()}">${dash(row.current)}</td><td align="right" style="${td()}">${dash(row.received)}</td><td align="right" style="${td()}color:${row.netFlow > 0 ? '#b91c1c' : row.netFlow < 0 ? '#15803d' : '#94a3b8'}">${signed(row.netFlow)}</td><td align="right" style="${td()}font-weight:800;color:${row.waiting ? '#b91c1c' : '#94a3b8'}">${dash(row.waiting)}</td><td align="right" style="${td()}">${pctLabel(row.waitingPct)}</td><td align="right" style="${td()}">${median}</td><td align="right" style="${td()}">${dwell}</td><td align="right" style="${td()}">${oldest}</td><td align="right" style="${td()}font-weight:800">${row.actionRate === null ? '—' : `${row.actionRate}%`}</td></tr>`;
+    }).join('');
+    return `${sectionTitle(`Owner detail — ${label}`, 'The numbers behind the scorecard. Median dwell = typical time an order sat with the owner before hand-off this week (≥ means at least; limited by the 7-day window).')}
+    <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">Owner</th><th align="right" style="${lightTh()}">Current</th><th align="right" style="${lightTh()}">Received</th><th align="right" style="${lightTh()}">Net flow</th><th align="right" style="${lightTh()}">Waiting &gt;24h</th><th align="right" style="${lightTh()}">Waiting %</th><th align="right" style="${lightTh()}">Median wait</th><th align="right" style="${lightTh()}">Median dwell</th><th align="right" style="${lightTh()}">Oldest waiting</th><th align="right" style="${lightTh()}">7-day activity</th></tr>${body || emptyRow(10, 'No owner assignments.')}</table></td></tr>`;
 }
-
-function renderBreakdown(rows) {
-    const body = rows.map(row => `<tr><td style="${td()}">${escapeHtml(row.label)}</td><td align="right" style="${td()}">${row.distinctItems}</td><td align="right" style="${td()}font-weight:800">${row.events}</td></tr>`).join('');
-    return `${sectionTitle('What counted as activity', 'Distinct orders and qualifying event volume by field.')}
-    <tr><td style="padding:0 28px 22px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">Qualifying field</th><th align="right" style="${lightTh()}">Orders</th><th align="right" style="${lightTh()}">Events</th></tr>${body || emptyRow(3, 'No qualifying activity.')}</table></td></tr>`;
-}
-
-function principle(title, text) { return `<td width="33.33%" valign="top" style="padding:5px"><div style="height:100%;padding:13px 14px;background:#f8fafc;border:1px solid #dce3ed"><div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#0f766e">${escapeHtml(title)}</div><div style="font-size:12px;line-height:18px;color:#526078;margin-top:4px">${escapeHtml(text)}</div></div></td>`; }
 function metric(label, value, note, color, width = '20%') { return `<td class="metric" width="${width}" valign="top" style="padding:4px"><div style="padding:13px 12px;border:1px solid #dce3ed;border-top:4px solid ${color}"><div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#64748b">${escapeHtml(label)}</div><div style="font-size:25px;font-weight:800;margin:4px 0">${value}</div><div style="font-size:10px;color:#64748b">${escapeHtml(note)}</div></div></td>`; }
 function sectionTitle(title, subtitle) { return `<tr><td style="padding:17px 28px 9px"><div style="font-size:17px;font-weight:800">${escapeHtml(title)}</div><div style="font-size:11px;color:#64748b;margin-top:3px">${escapeHtml(subtitle)}</div></td></tr>`; }
 function th() { return 'padding:9px 8px;color:#fff;font-size:10px;text-transform:uppercase;'; }
@@ -481,9 +519,13 @@ function logSummary(result, items, events, rawLogs, outputPath, send, dryRun) {
     console.log(`Loaded ${items.length} attributable items, ${rawLogs} board activity records, and ${events.length} qualifying events.`);
     for (const [key, label] of [['snap', 'Factory SNAP'], ['fieldService', 'Field Service']]) {
         const population = result.populations[key];
-        console.log(`${label}: ${population.currentOpen} current; ${population.totals.actioned} owner-item pairs actioned; ${population.totals.waiting} waiting >24h; ${population.totals.handedOff} moved onward; net flow ${population.totals.netFlow}; ${population.closedOrders} closed.`);
+        console.log(`${label}: ${population.currentOpen} current; ${population.totals.actioned} owner-item pairs actioned; ${population.totals.waiting} waiting >24h; ${population.totals.handedOff} handed off; net flow ${population.totals.netFlow}; ${population.closedOrders} closed; top mover: ${population.topActionedOwners.join(', ') || 'none'}.`);
     }
     console.log(`People with qualifying activity: ${result.actorRows.length}; orders touched: ${result.distinctItemsWithActivity}.`);
+    console.log(`Critical lines open: ${result.critical.openCritical}; avg age ${result.critical.avgAgeDays ?? '—'}d; top holders: ${result.critical.topHolders.map(entry => `${entry.owner} (${entry.count})`).join(', ') || 'none'}.`);
+    console.log(`Closure: ${result.closure.closedCount} closed this period; avg closure ${result.closure.avgClosureDays ?? '—'}d over ${result.closure.measuredCount} measurable.`);
+    const priorityLabels = [...new Set(items.map(item => item.priority).filter(Boolean))].sort();
+    console.log(`Priority labels on board: ${priorityLabels.join(', ') || 'none'} (critical regex: ${config.CRITICAL_PRIORITY_REGEX}).`);
     console.log(`Dynamic-owner ${send ? 'report' : 'preview'} saved: ${outputPath}`);
     if (!send || dryRun) console.log(`${dryRun ? 'Dry run' : 'Preview only'}: no email was sent and no Redis/report history was changed.`);
 }

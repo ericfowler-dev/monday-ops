@@ -121,6 +121,7 @@ function computeDynamicOwnerActivity({
     const pairs = new Map();
     const actors = new Map();
     const handoffs = new Map();
+    const dwellByOwner = new Map();
     const activityBreakdown = new Map();
     const eventAttributions = [];
     const modelledItemIds = new Set();
@@ -200,6 +201,7 @@ function computeDynamicOwnerActivity({
                         mergePair(pairs, currentEpisode);
                         recordHandoff(handoffs, population, currentEpisode.owner,
                             nextOwner || destinationLabelFor(event.nextStatus, population), item.id);
+                        recordDwell(dwellByOwner, population, currentEpisode.owner, event.at, currentEpisode);
                         currentEpisode = nextOwner ? startEpisode(item, population, nextOwner, event.at, true) : null;
                         attribution.receivedOwner = nextOwner;
                         if (currentEpisode) mergePair(pairs, currentEpisode);
@@ -227,6 +229,7 @@ function computeDynamicOwnerActivity({
                     const destinationOwner = ownerFor(status, destinationPopulation);
                     recordHandoff(handoffs, sourcePopulation, currentEpisode.owner,
                         destinationOwner || event.destinationGroupName || 'Outside report', item.id);
+                    recordDwell(dwellByOwner, sourcePopulation, currentEpisode.owner, event.at, currentEpisode);
                 }
                 groupId = event.destinationGroupId;
                 population = destinationPopulation;
@@ -260,8 +263,8 @@ function computeDynamicOwnerActivity({
     }
 
     const populations = {
-        snap: aggregatePopulation('snap', pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItemsByPopulation.snap),
-        fieldService: aggregatePopulation('fieldService', pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItemsByPopulation.fieldService)
+        snap: aggregatePopulation('snap', pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItemsByPopulation.snap, dwellByOwner),
+        fieldService: aggregatePopulation('fieldService', pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItemsByPopulation.fieldService, dwellByOwner)
     };
     const actorRows = [...actors.values()].map(actor => ({
         userId: actor.userId,
@@ -296,6 +299,13 @@ function computeDynamicOwnerActivity({
         eventAttributions,
         currentAssignments,
         executive: buildExecutiveSummary(populations),
+        critical: buildCriticalSummary({ items, currentAssignments }),
+        closure: buildClosureStats({
+            items,
+            closedItemIds: new Set([...closedItemsByPopulation.snap, ...closedItemsByPopulation.fieldService]),
+            fromDate,
+            refDate
+        }),
         dataQuality: {
             unmappedCurrentPairs: currentAssignments.filter(pair => pair.unmapped).length,
             unknownActorEvents: windowEvents.filter(event => !event.actorUserId || event.actorUserId === 'unknown').length,
@@ -392,6 +402,18 @@ function countBreakdown(breakdown, event) {
     row.distinctItems = row.itemIds.size;
 }
 
+// Dwell = how long the item sat with an owner before they handed it off. An
+// episode that began at the window edge (received=false) predates the visible
+// history, so its dwell is a lower bound.
+function recordDwell(dwellByOwner, population, owner, handedOffAt, episode) {
+    const key = population + ' ' + owner;
+    if (!dwellByOwner.has(key)) dwellByOwner.set(key, []);
+    dwellByOwner.get(key).push({
+        hours: Math.max(0, (handedOffAt - episode.startedAt) / 3600000),
+        lowerBound: !episode.received
+    });
+}
+
 function recordHandoff(handoffs, population, source, destination, itemId) {
     const key = `${population}\u0000${source}\u0000${destination}`;
     if (!handoffs.has(key)) handoffs.set(key, { population, source, destination, events: 0, itemIds: new Set() });
@@ -400,7 +422,7 @@ function recordHandoff(handoffs, population, source, destination, itemId) {
     row.itemIds.add(String(itemId));
 }
 
-function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItems) {
+function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItems, dwellByOwner) {
     const populationPairs = [...pairs.values()].filter(pair => pair.population === population);
     const rows = {};
     const rowFor = owner => rows[owner] || (rows[owner] = {
@@ -417,6 +439,9 @@ function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs
         waitingPct: null,
         medianWaitHours: null,
         medianWaitLowerBound: false,
+        medianDwellHours: null,
+        medianDwellLowerBound: false,
+        dwellSampleHours: [],
         activityEvents: 0,
         oldestWaitingHours: null,
         oldestWaitingName: '',
@@ -471,7 +496,17 @@ function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs
         const waits = currentWaitsByOwner.get(owner) || [];
         row.medianWaitHours = medianOf(waits.map(wait => wait.hours));
         row.medianWaitLowerBound = waits.some(wait => wait.lowerBound);
+        const dwells = (dwellByOwner && dwellByOwner.get(population + ' ' + owner)) || [];
+        row.dwellSampleHours = dwells.map(dwell => Math.round(dwell.hours * 10) / 10);
+        row.medianDwellHours = medianOf(dwells.map(dwell => dwell.hours));
+        row.medianDwellLowerBound = dwells.some(dwell => dwell.lowerBound);
     }
+
+    const namedRows = Object.entries(rows).filter(([owner]) => owner !== movementCore.UNMAPPED_LABEL);
+    const maxActioned = Math.max(0, ...namedRows.map(([, row]) => row.actioned));
+    const topActionedOwners = maxActioned > 0
+        ? namedRows.filter(([, row]) => row.actioned === maxActioned).map(([owner]) => owner).sort()
+        : [];
 
     const totals = Object.values(rows).reduce((total, row) => {
         for (const key of ['received', 'actioned', 'handedOff', 'waiting', 'current', 'actionedCurrent', 'past6w', 'eligible', 'activityEvents']) {
@@ -503,6 +538,7 @@ function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs
         totals,
         attention,
         handoffs: populationHandoffs,
+        topActionedOwners,
         currentOpen,
         informationalOpen,
         waitingHours,
@@ -611,6 +647,104 @@ function buildExecutiveSummary(populations) {
     };
 }
 
+// Critical lines (Priority column) across both populations. Holder is the
+// accountable owner of the current assignment; supplier-waiting criticals are
+// reported honestly under the informational label rather than a person.
+function buildCriticalSummary({ items, currentAssignments }) {
+    const assignmentByItem = new Map((currentAssignments || []).map(pair => [pair.itemId, pair]));
+    const critical = items.filter(item => item.isOpen && item.population && item.isCritical);
+    const holders = new Map();
+    const perPopulation = { snap: 0, fieldService: 0 };
+    const ages = [];
+    for (const item of critical) {
+        perPopulation[item.population] += 1;
+        if (Number.isFinite(item.ageDays)) ages.push(item.ageDays);
+        const supplierWaiting = movementCore.normalizeText(item.status).toLowerCase()
+            === movementCore.INFORMATIONAL_LABEL.toLowerCase();
+        const holder = assignmentByItem.get(item.id)?.owner
+            || (supplierWaiting ? movementCore.INFORMATIONAL_LABEL : movementCore.UNMAPPED_LABEL);
+        holders.set(holder, (holders.get(holder) || 0) + 1);
+    }
+    const maxHeld = Math.max(0, ...holders.values());
+    return {
+        openCritical: critical.length,
+        perPopulation,
+        avgAgeDays: ages.length ? Math.round(ages.reduce((a, b) => a + b, 0) / ages.length) : null,
+        medianAgeDays: medianOf(ages),
+        agedCount: ages.length,
+        topHolders: maxHeld > 0
+            ? [...holders.entries()].filter(([, count]) => count === maxHeld)
+                .map(([owner, count]) => ({ owner, count }))
+                .sort((a, b) => a.owner.localeCompare(b.owner))
+            : []
+    };
+}
+
+// Shipment closure time = Date Shipped minus Order Date (falling back to item
+// creation) for orders closed this period. Orders missing either date count in
+// closedCount but not measuredCount, so the report can show "n of m measurable".
+function buildClosureStats({ items, closedItemIds, fromDate, refDate }) {
+    const ids = closedItemIds || new Set();
+    const closed = items.filter(item => {
+        if (!item.population) return false;
+        if (ids.has(String(item.id))) return true;
+        const shipped = toDate(item.dateShipped);
+        return Boolean(shipped && shipped >= fromDate && shipped <= refDate);
+    });
+    const durations = [];
+    for (const item of closed) {
+        const start = toDate(item.orderDate) || toDate(item.createdAt);
+        const end = toDate(item.dateShipped);
+        if (!start || !end || end < start) continue;
+        durations.push((end - start) / 86400000);
+    }
+    return {
+        closedCount: closed.length,
+        measuredCount: durations.length,
+        avgClosureDays: durations.length
+            ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length * 10) / 10 : null,
+        medianClosureDays: durations.length ? Math.round(medianOf(durations) * 10) / 10 : null
+    };
+}
+
+// Per-person actioned counts per stored week, with the live week appended as
+// the rightmost column. Tolerates v1 snapshots (they carry the same rows shape)
+// and skips malformed weeks. Owners are summed across both populations.
+function buildActionedTrend({ historyWeeks, currentWeekKey, currentResult, maxWeeks = 8 }) {
+    const stored = Object.entries(historyWeeks || {})
+        .filter(([key, week]) => key < currentWeekKey && week && week.populations)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .slice(-(Math.max(1, maxWeeks) - 1));
+    const columns = [
+        ...stored.map(([key, week]) => ({ key, populations: week.populations })),
+        { key: currentWeekKey, populations: currentResult.populations }
+    ];
+    const actionedFor = (populations, owner) => ['snap', 'fieldService'].reduce((total, population) => {
+        const row = populations?.[population]?.rows?.[owner];
+        return total + (row && Number.isFinite(row.actioned) ? row.actioned : 0);
+    }, 0);
+    const ownerNames = new Set();
+    for (const column of columns) {
+        for (const population of ['snap', 'fieldService']) {
+            for (const owner of Object.keys(column.populations?.[population]?.rows || {})) {
+                if (owner !== movementCore.UNMAPPED_LABEL && owner !== movementCore.INFORMATIONAL_LABEL) {
+                    ownerNames.add(owner);
+                }
+            }
+        }
+    }
+    const owners = [...ownerNames].map(owner => {
+        const counts = columns.map(column => actionedFor(column.populations, owner));
+        return { owner, counts, total: counts.reduce((a, b) => a + b, 0) };
+    }).sort((a, b) => b.total - a.total || a.owner.localeCompare(b.owner));
+    return {
+        weekKeys: columns.map(column => column.key),
+        owners,
+        weeksAvailable: columns.length,
+        maxCount: Math.max(0, ...owners.flatMap(row => row.counts))
+    };
+}
+
 // Weekly snapshot record (spec §15): persisted so trend sections and true
 // dwell/return-loop metrics can be added once history accrues.
 function buildWeeklySnapshot({ result, items, refDate }) {
@@ -625,6 +759,9 @@ function buildWeeklySnapshot({ result, items, refDate }) {
         waitingPct: row.waitingPct,
         medianWaitHours: row.medianWaitHours,
         medianWaitLowerBound: row.medianWaitLowerBound,
+        medianDwellHours: row.medianDwellHours ?? null,
+        medianDwellLowerBound: row.medianDwellLowerBound ?? false,
+        dwellSampleHours: row.dwellSampleHours || [],
         past6w: row.past6w
     }]));
     const litePopulation = pop => ({
@@ -635,9 +772,11 @@ function buildWeeklySnapshot({ result, items, refDate }) {
         rows: liteRows(pop.rows)
     });
     return {
-        version: 1,
+        version: 2,
         generatedAt: refDate.toISOString(),
         executive: result.executive,
+        critical: result.critical || null,
+        closure: result.closure || null,
         dataQuality: result.dataQuality,
         populations: {
             snap: litePopulation(result.populations.snap),
@@ -659,6 +798,8 @@ function buildWeeklySnapshot({ result, items, refDate }) {
                 waitingHours: pair ? Math.round(pair.waitingHours * 10) / 10 : null,
                 waitingLowerBound: pair ? pair.waitingLowerBound : false,
                 ageDays: Number.isFinite(item.ageDays) ? item.ageDays : null,
+                priority: movementCore.normalizeText(item.priority),
+                isCritical: Boolean(item.isCritical),
                 unmapped: pair ? pair.unmapped : false
             };
         })
@@ -689,6 +830,9 @@ module.exports = {
     normalizeBoardActivityLogs,
     computeDynamicOwnerActivity,
     buildExecutiveSummary,
+    buildCriticalSummary,
+    buildClosureStats,
+    buildActionedTrend,
     buildWeeklySnapshot,
     medianOf
 };

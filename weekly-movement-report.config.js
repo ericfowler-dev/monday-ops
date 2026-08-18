@@ -21,6 +21,14 @@ module.exports = {
     SHIPPING_GATE_STATUSES: ['Pending Shipment Approval', 'Approved for Shipment'],
     DEFAULT_RECIPIENT: 'efowler@psiengines.com',
 
+    // Priority labels that count as critical lines. The daily SNAP report treats
+    // /critical|high/i as attention-worthy; this report tracks true criticals only.
+    CRITICAL_PRIORITY_REGEX: /critical/i,
+    // Weekly actioned trend: hide the section until this many stored weeks exist,
+    // and show at most this many trailing weeks.
+    TREND_MIN_WEEKS: 2,
+    TREND_MAX_WEEKS: 8,
+
     // The board has no Owner column, so ownership follows Current Dept / Status.
     // Confirmed with Ambrea (Richard's 8/4 email). Values:
     //   string                  same owner for SNAP and Field Service lines
