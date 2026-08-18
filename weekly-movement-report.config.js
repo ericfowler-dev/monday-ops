@@ -10,7 +10,10 @@ module.exports = {
     FIELD_SERVICE_GROUP_ID: base.FIELD_SERVICE_GROUP_ID,
     COL_IDS: base.COL_IDS,
     TIME_ZONE: base.TIME_ZONE,
-    CLOSED_CURRENT_STATUSES: base.CLOSED_CURRENT_STATUSES,
+    // Base treats only "Shipped" as done. This report also treats "Cancelled" as
+    // terminal (Eric 8/18) so cancelled lines leave open-order and owner metrics;
+    // the daily SNAP report keeps base behavior.
+    CLOSED_CURRENT_STATUSES: [...base.CLOSED_CURRENT_STATUSES, 'Cancelled'],
 
     SCHEDULE_WEEKDAY: 1, // Monday (0 = Sunday)
     SCHEDULE_HOUR: 5,
@@ -30,7 +33,8 @@ module.exports = {
     TREND_MAX_WEEKS: 8,
 
     // The board has no Owner column, so ownership follows Current Dept / Status.
-    // Confirmed with Ambrea (Richard's 8/4 email). Values:
+    // Confirmed with Ambrea (Richard's 8/4 email); Shipment Complication added
+    // per Eric 8/18. Values:
     //   string                  same owner for SNAP and Field Service lines
     //   { snap, fieldService }  split ownership by population
     //   null                    informational status - no owner, reported on its own row
@@ -47,6 +51,7 @@ module.exports = {
         'Project Management': 'Clare Heckert',
         'Customer Supplied': 'Fernando Morales',
         'Field Service': 'Ambrea Ayala',
+        'Shipment Complication': 'Thania Sandoval',
         'Pending Shipment Approval': { snap: 'Clare Heckert', fieldService: 'Ambrea Ayala' },
         'Awaiting Full Order': { snap: 'Clare Heckert', fieldService: 'Ambrea Ayala' },
         'Ordered from Supplier': null

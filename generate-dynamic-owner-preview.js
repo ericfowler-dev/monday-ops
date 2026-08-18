@@ -102,7 +102,11 @@ async function generateReport() {
     const outputPath = saveHtml(html, now, deliveryMode);
     if (deliveryMode && !dryRun) {
         await sendEmail(html, now);
-        await persistSnapshot(result, items, now);
+        if (isSnapshotDay(now)) {
+            await persistSnapshot(result, items, now);
+        } else {
+            console.log(`Off-schedule run (${config.TIME_ZONE} weekday is not the scheduled day): email sent, weekly snapshot skipped so test runs never pollute trend history.`);
+        }
     }
     logSummary(result, items, events, rawLogs.length, outputPath, deliveryMode, dryRun);
 }
@@ -127,6 +131,14 @@ async function persistSnapshot(result, items, now) {
     } finally {
         if (store) await store.close().catch(() => {});
     }
+}
+
+// Weekly trend history must stay one-snapshot-per-week, so only runs on the
+// scheduled weekday (Monday, Central time) persist history. Off-schedule test
+// sends deliver accurate 7-day data but leave stored history untouched.
+function isSnapshotDay(now) {
+    const weekday = new Intl.DateTimeFormat('en-US', { timeZone: config.TIME_ZONE, weekday: 'short' }).format(now);
+    return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(weekday) === config.SCHEDULE_WEEKDAY;
 }
 
 // Trend data is best-effort: environments without Redis (or with an empty local
