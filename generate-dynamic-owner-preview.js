@@ -297,7 +297,8 @@ function renderHtml(data) {
           historyWeeks: data.historyWeeks,
           currentWeekKey: data.currentWeekKey,
           currentResult: result,
-          maxWeeks: config.TREND_MAX_WEEKS
+          maxWeeks: config.TREND_MAX_WEEKS,
+          snapshotWeekday: config.SCHEDULE_WEEKDAY
       }))}
       ${renderBottleneck(result.populations)}
       ${renderAgingBuckets(result.populations)}

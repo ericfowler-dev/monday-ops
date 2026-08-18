@@ -385,6 +385,32 @@ test('actioned trend merges populations per person and tolerates v1 snapshots', 
     assert.deepEqual(trimmed.weekKeys, ['2026-08-10', '2026-08-17']);
 });
 
+test('actioned trend ignores snapshots written off the scheduled weekday', () => {
+    const currentResult = compute([item()], [
+        event('status', '2026-08-04T08:00:00.000Z', { previousStatus: 'Dept A', nextStatus: 'Dept B', columnTitle: 'Current Dept / Status' })
+    ]);
+    const week = actioned => ({ version: 2, populations: { snap: { rows: {} }, fieldService: { rows: { 'Owner B': { actioned } } } } });
+    // The keys actually stored on 2026-08-18: one Monday plus five nightly runs.
+    const historyWeeks = {
+        '2026-08-10': week(50), // Mon
+        '2026-08-11': week(60), // Tue
+        '2026-08-12': week(61), // Wed
+        '2026-08-13': week(62), // Thu
+        '2026-08-16': week(63), // Sun
+        '2026-08-17': week(70)  // Mon
+    };
+    const monday = 1;
+    const trend = buildActionedTrend({ historyWeeks, currentWeekKey: '2026-08-24', currentResult, maxWeeks: 8, snapshotWeekday: monday });
+    assert.deepEqual(trend.weekKeys, ['2026-08-10', '2026-08-17', '2026-08-24']);
+    const ownerB = trend.owners.find(row => row.owner === 'Owner B');
+    // Owner B receives but never actions in the live window, so today's cell is 0.
+    assert.deepEqual(ownerB.counts, [50, 70, 0]);
+    assert.equal(ownerB.total, 120);
+    // Without the gate every overlapping nightly window is summed instead.
+    const ungated = buildActionedTrend({ historyWeeks, currentWeekKey: '2026-08-24', currentResult, maxWeeks: 8 });
+    assert.equal(ungated.owners.find(row => row.owner === 'Owner B').total, 366);
+});
+
 test('normalizer deduplicates activity, removes same-value edits, and keeps group moves', () => {
     const stamp = String(Date.parse('2026-08-04T12:00:00.000Z') * 10000);
     const statusData = JSON.stringify({
