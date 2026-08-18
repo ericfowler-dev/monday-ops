@@ -391,26 +391,16 @@ function renderPopulation(title, color, background, population) {
       ${metric('Closed / shipped', population.closedOrders, 'this period', '#15803d')}
     </tr></table></td></tr>
     ${sectionTitle('Owner scorecard', 'Two numbers per person: orders they actioned and orders they handed onward this week. ★ marks the top mover.')}
-    <tr><td style="padding:0 28px 10px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed">
+    <tr><td style="padding:0 28px 20px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed">
       <tr style="background:#12213f"><th align="left" style="${th()}">Accountable owner</th><th align="right" style="${th()}width:60px">Actioned</th><th align="left" style="${th()}width:160px"></th><th align="right" style="${th()}width:70px">Handed off</th><th align="left" style="${th()}width:160px"></th></tr>
       ${body || emptyRow(5, 'No matching owner activity.')}
-    </table></td></tr>
-    ${renderAttentionCallout(population.attention)}`;
+    </table></td></tr>`;
 }
 
 function scoreRow(owner, row, isTop, maxValue) {
     const highlight = isTop ? 'background:#ecfdf5;' : '';
     const badge = isTop ? ' <span style="font-size:10px;font-weight:800;color:#047857;letter-spacing:.5px">★ TOP MOVER</span>' : '';
     return `<tr${isTop ? ' bgcolor="#ecfdf5"' : ''}><td style="${td()}${highlight}font-weight:700">${escapeHtml(owner)}${badge}</td><td align="right" style="${td()}${highlight}font-weight:800;font-size:14px;color:#15803d">${dash(row.actioned)}</td><td style="${td()}${highlight}">${bar(row.actioned, maxValue, '#15803d')}</td><td align="right" style="${td()}${highlight}font-weight:800;font-size:14px;color:#0369a1">${dash(row.handedOff)}</td><td style="${td()}${highlight}">${bar(row.handedOff, maxValue, '#0369a1')}</td></tr>`;
-}
-
-function renderAttentionCallout(items) {
-    if (!items.length) {
-        return `<tr><td style="padding:0 28px 20px"><div style="padding:9px 13px;background:#f0fdf4;border:1px solid #86efac;color:#166534;font-size:12px">No orders waiting more than 24 hours.</div></td></tr>`;
-    }
-    const links = items.slice(0, 3).map(item =>
-        `<a href="${escapeHtml(item.url)}" style="color:#1d4ed8;text-decoration:none;font-weight:700">${escapeHtml(item.name)}</a> (${item.waitingLowerBound ? '≥' : ''}${formatDuration(item.waitingHours)}, ${escapeHtml(item.owner)})`).join(' · ');
-    return `<tr><td style="padding:0 28px 20px"><div style="padding:9px 13px;background:#fff7ed;border:1px solid #fdba74;color:#9a3412;font-size:12px;line-height:19px"><b>${items.length} order${items.length === 1 ? '' : 's'} waiting &gt;24h.</b> Longest: ${links}. Click an order to open it in monday.com.</div></td></tr>`;
 }
 
 // Outlook's Word renderer ignores CSS widths on divs but honors width/bgcolor
