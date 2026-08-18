@@ -34,11 +34,15 @@ Those values may be different and are deliberately reported separately.
 | Project Management | Clare Heckert | Clare Heckert |
 | Customer Supplied | Fernando Morales | Fernando Morales |
 | Field Service | Ambrea Ayala | Ambrea Ayala |
+| Shipment Complication | Thania Sandoval | Thania Sandoval |
 | Pending Shipment Approval | Clare Heckert | Ambrea Ayala |
 | Awaiting Full Order | Clare Heckert | Ambrea Ayala |
 | Ordered from Supplier | Informational—no person exception | Informational—no person exception |
 | Shipped | Closed | Closed |
+| Cancelled | Closed (excluded from open orders; Eric 8/18) | Closed (excluded from open orders; Eric 8/18) |
 | Any unmapped value | `Unmapped — check config` | `Unmapped — check config` |
+
+"Closed" statuses are terminal for this report: the item leaves Current open, owner metrics, and waiting exceptions; a transition into a closed status records as the prior owner handing off to `Closed — <status>` and counts toward "Closed / shipped this period". Note the cancelled exclusion is movement-report-only (`CLOSED_CURRENT_STATUSES` override in `weekly-movement-report.config.js`); the daily SNAP report still lists cancelled lines.
 
 ## 3. What qualifies as activity
 
@@ -107,6 +111,8 @@ The report opens with a data quality card counting: current assignments with unm
 Delivery-mode runs (not previews or dry runs) persist a weekly snapshot (`buildWeeklySnapshot` in `dynamic-owner-activity-core.js`) via `dynamic-owner-history-store.js` — Redis keys `dynamic:history` / `dynamic:last-run` when `REDIS_URL` is set, otherwise a local `history-dynamic-owner.json` fallback (ephemeral on Render). Retention is 26 weeks. Snapshot failure is non-fatal and logged after the email sends.
 
 Snapshot **v2** (8/2026 feedback revision) adds: per-item `priority`/`isCritical`, per-owner `medianDwellHours`/`medianDwellLowerBound`/`dwellSampleHours`, and top-level `critical`/`closure` blocks. Trend readers tolerate v1 weeks (missing fields read as absent). The report now also **reads** history at render time to build the Weekly actioned trend — verify `REDIS_URL` is populated on the Render service or the trend never accumulates. Multi-week dwell medians and return-loop rate remain deferred until enough v2 snapshots accrue.
+
+**Snapshots persist only on the scheduled weekday** (Monday, `TIME_ZONE`) as of 8/18: delivery runs on any other day — validation-period daily sends, Trigger Runs, post-deploy runs — email accurate trailing-7-day data but skip the history write, keeping the trend one snapshot per week. During the approval/testing period the Render schedule is `0 10 * * 1-5` (5 AM Central weekdays, CDT); once the report is approved it returns to `0 10,11 * * 1` (Monday only, DST-safe).
 
 ## 6. Fact-check recipe
 
