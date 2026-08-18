@@ -707,12 +707,26 @@ function buildClosureStats({ items, closedItemIds, fromDate, refDate }) {
     };
 }
 
+function weekdayOfDateKey(dateKey) {
+    const match = String(dateKey).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return null;
+    // Keys are already local calendar dates; read the weekday at midday UTC so
+    // no timezone conversion can shift the day.
+    return new Date(Date.UTC(+match[1], +match[2] - 1, +match[3], 12)).getUTCDay();
+}
+
 // Per-person actioned counts per stored week, with the live week appended as
 // the rightmost column. Tolerates v1 snapshots (they carry the same rows shape)
 // and skips malformed weeks. Owners are summed across both populations.
-function buildActionedTrend({ historyWeeks, currentWeekKey, currentResult, maxWeeks = 8 }) {
+//
+// Each snapshot measures a trailing 7-day window, so two snapshots less than a
+// week apart double-count the same activity. When snapshotWeekday is supplied,
+// only keys written on that weekday are charted — off-schedule keys (from test
+// runs or a mis-set cron) are ignored rather than inflating the totals.
+function buildActionedTrend({ historyWeeks, currentWeekKey, currentResult, maxWeeks = 8, snapshotWeekday = null }) {
+    const onSchedule = key => snapshotWeekday === null || weekdayOfDateKey(key) === snapshotWeekday;
     const stored = Object.entries(historyWeeks || {})
-        .filter(([key, week]) => key < currentWeekKey && week && week.populations)
+        .filter(([key, week]) => key < currentWeekKey && week && week.populations && onSchedule(key))
         .sort(([a], [b]) => a.localeCompare(b))
         .slice(-(Math.max(1, maxWeeks) - 1));
     const columns = [
