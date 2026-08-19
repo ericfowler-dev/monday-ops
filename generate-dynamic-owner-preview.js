@@ -430,7 +430,12 @@ function renderOwnerTrend(trend) {
         return `${sectionTitle('Weekly actioned trend', subtitle)}
         <tr><td style="padding:0 28px 18px"><div style="padding:11px 14px;background:#f8fafc;border:1px dashed #cbd5e1;color:#64748b;font-size:12px">The per-person weekly trend will appear here once at least ${config.TREND_MIN_WEEKS} weeks of history have accrued (currently ${trend.weeksAvailable}). History is stored each time the report is delivered.</div></td></tr>`;
     }
-    const headers = trend.weekKeys.map(key => `<th align="center" style="${lightTh()}">${escapeHtml(weekLabel(key))}</th>`).join('');
+    // The rightmost column is the live window, not a stored Monday snapshot,
+    // so label it plainly rather than with a confusing mid-week date.
+    const headers = trend.weekKeys.map((key, index) => {
+        const label = index === trend.weekKeys.length - 1 ? 'This week' : `wk ${weekLabel(key)}`;
+        return `<th align="center" style="${lightTh()}">${escapeHtml(label)}</th>`;
+    }).join('');
     const body = trend.owners.map(row => {
         const cells = row.counts.map(count => {
             const [background, color] = heatColors(count, trend.maxCount);
