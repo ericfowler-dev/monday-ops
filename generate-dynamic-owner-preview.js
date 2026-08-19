@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./weekly-movement-report.config');
 const { normalizeBoardActivityLogs, computeDynamicOwnerActivity, buildWeeklySnapshot, buildActionedTrend } = require('./dynamic-owner-activity-core');
-const { pruneWeeks } = require('./weekly-movement-core');
+const { pruneWeeks, ownerFor } = require('./weekly-movement-core');
 const { createHistoryStore } = require('./dynamic-owner-history-store');
 
 const MONDAY_API_VERSION = process.env.MONDAY_API_VERSION || '2026-07';
@@ -121,7 +121,13 @@ async function persistSnapshot(result, items, now) {
         history.version = 1;
         history.weeks = history.weeks || {};
         const dateKey = formatDateKey(now);
-        history.weeks[dateKey] = buildWeeklySnapshot({ result, items, refDate: now });
+        history.weeks[dateKey] = buildWeeklySnapshot({
+            result,
+            items,
+            refDate: now,
+            isInformational: (status, population) =>
+                ownerFor(status || 'Unassigned', population, config.OWNER_MAP).informational === true
+        });
         pruneWeeks(history.weeks, config.HISTORY_RETENTION_WEEKS);
         await store.writeHistory(history);
         await store.writeLastRun(dateKey);
@@ -331,7 +337,7 @@ function renderExecutiveSummary(executive) {
     const netColor = executive.netFlow > 0 ? '#b91c1c' : executive.netFlow < 0 ? '#15803d' : '#64748b';
     return `${sectionTitle('Executive summary', 'Both workflow populations combined. Owner metrics count owner–item pairs; open and closed counts are unique orders.')}
     <tr><td style="padding:0 24px 6px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
-      ${metric('Current open', executive.currentOpenOrders, `${executive.snapOpen} SNAP · ${executive.fieldOpen} Field · ${executive.supplierWaiting} supplier-waiting`, '#2563eb', '16.66%')}
+      ${metric('Current open', executive.currentOpenOrders, `${executive.snapOpen} SNAP · ${executive.fieldOpen} Field · ${executive.supplierWaiting} unowned stages`, '#2563eb', '16.66%')}
       ${metric('Received', executive.received, 'owner–item pairs', '#7c3aed', '16.66%')}
       ${metric('Handed off', executive.movedOnward, 'owner–item pairs', '#0369a1', '16.66%')}
       ${metric('Net flow', signed(executive.netFlow), 'received − handed off', netColor, '16.66%')}
@@ -350,7 +356,7 @@ function renderBottleneck(populations) {
         const median = row.medianSinceActivityHours === null ? '—' : `${row.medianLowerBound ? '≥' : ''}${formatDuration(row.medianSinceActivityHours)}`;
         return `<tr><td style="${td()}font-weight:700">${escapeHtml(row.status)}</td><td style="${td()}">${escapeHtml(row.populationLabel)}</td><td align="right" style="${td()}">${row.currentCount}</td><td align="right" style="${td()}font-weight:800;color:${row.waiting ? '#b91c1c' : '#94a3b8'}">${dash(row.waiting)}</td><td align="right" style="${td()}">${pctLabel(row.waitingPct)}</td><td align="right" style="${td()}">${median}</td><td align="right" style="${td()}">${row.oldestAgeDays === null ? '—' : `${row.oldestAgeDays}d`}</td><td align="center" style="${td()}">${row.supplierWaiting ? 'Yes' : '—'}</td></tr>`;
     }).join('');
-    return `${sectionTitle('Where work is stuck', 'Top workflow statuses by waiting count (top 6 shown). Supplier rows carry no owner, so waiting stats do not apply.')}
+    return `${sectionTitle('Where work is stuck', 'Top workflow statuses by waiting count (top 6 shown). Unowned stages (Ordered from Supplier, Awaiting Full Order) carry no owner, so waiting stats do not apply.')}
     <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#12213f"><th align="left" style="${th()}">Status</th><th align="left" style="${th()}">Population</th><th align="right" style="${th()}">Current</th><th align="right" style="${th()}">Waiting &gt;24h</th><th align="right" style="${th()}">Waiting %</th><th align="right" style="${th()}">Median since activity</th><th align="right" style="${th()}">Oldest (age)</th><th align="center" style="${th()}">Supplier</th></tr>${rows || emptyRow(8, 'No current open work.')}</table></td></tr>`;
 }
 
@@ -368,7 +374,7 @@ function renderAgingBuckets(populations) {
     }).join('');
     const unknown = snap.unknownAge + field.unknownAge;
     const unknownRow = unknown ? `<tr><td style="${td()}color:#64748b">Age unknown (no order date)</td><td style="${td()}"></td><td align="right" style="${td()}">${dash(snap.unknownAge)}</td><td align="right" style="${td()}">${dash(field.unknownAge)}</td><td align="right" style="${td()}font-weight:800">${unknown}</td><td align="right" style="${td()}">${pctLabel(total ? Math.round(unknown / total * 100) : null)}</td></tr>` : '';
-    return `${sectionTitle('Aging distribution', 'Currently assigned work bucketed by order age (order date, falling back to creation date). Supplier-waiting items are excluded.')}
+    return `${sectionTitle('Aging distribution', 'Currently assigned work bucketed by order age (order date, falling back to creation date). Unowned stages are excluded.')}
     <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">Order age</th><th align="left" style="${lightTh()}width:170px"></th><th align="right" style="${lightTh()}">Factory SNAP</th><th align="right" style="${lightTh()}">Field Service</th><th align="right" style="${lightTh()}">Total</th><th align="right" style="${lightTh()}">% of assigned</th></tr>${rows}${unknownRow}</table></td></tr>`;
 }
 
@@ -397,7 +403,7 @@ function renderPopulation(title, color, background, population) {
       <div style="font-size:20px;font-weight:800">${escapeHtml(title)}</div><div style="margin-top:4px;font-size:12px;color:#526078">Who moved work this week — full per-owner metrics are in the owner detail tables at the end</div>
     </td></tr>
     <tr><td style="padding:14px 24px 6px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
-      ${metric('Current open', population.currentOpen, `${population.informationalOpen} supplier-waiting`, color)}
+      ${metric('Current open', population.currentOpen, `${population.informationalOpen} unowned (supplier / awaiting full order)`, color)}
       ${metric('Received', totals.received, 'owner–item pairs', '#7c3aed')}
       ${metric('Handed off', totals.handedOff, 'owner–item pairs', '#0369a1')}
       ${metric('Waiting >24h', totals.waiting, `${pctLabel(totals.waitingPct)} of assigned`, totals.waiting ? '#b91c1c' : '#64748b')}
@@ -465,10 +471,13 @@ function renderOwnerDetail(label, population) {
         const median = row.medianWaitHours === null ? '—' : `${row.medianWaitLowerBound ? '≥' : ''}${formatDuration(row.medianWaitHours)}`;
         const dwell = row.medianDwellHours === null ? '—' : `${row.medianDwellLowerBound ? '≥' : ''}${formatDuration(row.medianDwellHours)}`;
         const oldest = row.oldestWaitingHours === null ? '—' : `${row.oldestWaitingLowerBound ? '≥' : ''}${formatDuration(row.oldestWaitingHours)}`;
-        return `<tr><td style="${td()}font-weight:700">${escapeHtml(owner)}</td><td align="right" style="${td()}">${dash(row.current)}</td><td align="right" style="${td()}">${dash(row.received)}</td><td align="right" style="${td()}color:${row.netFlow > 0 ? '#b91c1c' : row.netFlow < 0 ? '#15803d' : '#94a3b8'}">${signed(row.netFlow)}</td><td align="right" style="${td()}font-weight:800;color:${row.waiting ? '#b91c1c' : '#94a3b8'}">${dash(row.waiting)}</td><td align="right" style="${td()}">${pctLabel(row.waitingPct)}</td><td align="right" style="${td()}">${median}</td><td align="right" style="${td()}">${dwell}</td><td align="right" style="${td()}">${oldest}</td><td align="right" style="${td()}font-weight:800">${row.actionRate === null ? '—' : `${row.actionRate}%`}</td></tr>`;
+        const oldestOrder = row.oldestOrderAgeDays === null
+            ? '—'
+            : `${row.oldestOrderAgeDays}d${row.oldestOrderDate ? `<div style="font-size:10px;color:#94a3b8">${escapeHtml(formatShortDate(new Date(row.oldestOrderDate)))}</div>` : ''}`;
+        return `<tr><td style="${td()}font-weight:700">${escapeHtml(owner)}</td><td align="right" style="${td()}">${dash(row.current)}</td><td align="right" style="${td()}">${dash(row.received)}</td><td align="right" style="${td()}color:${row.netFlow > 0 ? '#b91c1c' : row.netFlow < 0 ? '#15803d' : '#94a3b8'}">${signed(row.netFlow)}</td><td align="right" style="${td()}font-weight:800;color:${row.waiting ? '#b91c1c' : '#94a3b8'}">${dash(row.waiting)}</td><td align="right" style="${td()}">${pctLabel(row.waitingPct)}</td><td align="right" style="${td()}">${median}</td><td align="right" style="${td()}">${dwell}</td><td align="right" style="${td()}">${oldest}</td><td align="right" style="${td()}font-weight:800;color:${row.oldestOrderAgeDays !== null && row.oldestOrderAgeDays > config.PAST_DUE_DAYS ? '#b91c1c' : '#172033'}">${oldestOrder}</td><td align="right" style="${td()}font-weight:800">${row.actionRate === null ? '—' : `${row.actionRate}%`}</td></tr>`;
     }).join('');
-    return `${sectionTitle(`Owner detail — ${label}`, 'The numbers behind the scorecard. Median dwell = typical time an order sat with the owner before hand-off this week (≥ means at least; limited by the 7-day window).')}
-    <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">Owner</th><th align="right" style="${lightTh()}">Current</th><th align="right" style="${lightTh()}">Received</th><th align="right" style="${lightTh()}">Net flow</th><th align="right" style="${lightTh()}">Waiting &gt;24h</th><th align="right" style="${lightTh()}">Waiting %</th><th align="right" style="${lightTh()}">Median wait</th><th align="right" style="${lightTh()}">Median dwell</th><th align="right" style="${lightTh()}">Oldest waiting</th><th align="right" style="${lightTh()}">7-day activity</th></tr>${body || emptyRow(10, 'No owner assignments.')}</table></td></tr>`;
+    return `${sectionTitle(`Owner detail — ${label}`, 'The numbers behind the scorecard. Median dwell = typical time an order sat with the owner before hand-off this week (≥ means at least; limited by the 7-day window). Oldest order is true order age and is not window-limited.')}
+    <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">Owner</th><th align="right" style="${lightTh()}">Current</th><th align="right" style="${lightTh()}">Received</th><th align="right" style="${lightTh()}">Net flow</th><th align="right" style="${lightTh()}">Waiting &gt;24h</th><th align="right" style="${lightTh()}">Waiting %</th><th align="right" style="${lightTh()}">Median wait</th><th align="right" style="${lightTh()}">Median dwell</th><th align="right" style="${lightTh()}">Oldest waiting</th><th align="right" style="${lightTh()}">Oldest order</th><th align="right" style="${lightTh()}">7-day activity</th></tr>${body || emptyRow(11, 'No owner assignments.')}</table></td></tr>`;
 }
 function metric(label, value, note, color, width = '20%') { return `<td class="metric" width="${width}" valign="top" style="padding:4px"><div style="padding:13px 12px;border:1px solid #dce3ed;border-top:4px solid ${color}"><div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#64748b">${escapeHtml(label)}</div><div style="font-size:25px;font-weight:800;margin:4px 0">${value}</div><div style="font-size:10px;color:#64748b">${escapeHtml(note)}</div></div></td>`; }
 function sectionTitle(title, subtitle) { return `<tr><td style="padding:17px 28px 9px"><div style="font-size:17px;font-weight:800">${escapeHtml(title)}</div><div style="font-size:11px;color:#64748b;margin-top:3px">${escapeHtml(subtitle)}</div></td></tr>`; }

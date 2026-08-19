@@ -4,6 +4,7 @@ const {
     normalizeBoardActivityLogs,
     computeDynamicOwnerActivity,
     buildActionedTrend,
+    NO_OWNER_LABEL,
     buildWeeklySnapshot,
     medianOf
 } = require('./dynamic-owner-activity-core');
@@ -14,7 +15,8 @@ const OWNER_MAP = {
     'Dept A': 'Owner A',
     'Dept B': 'Owner B',
     'Dept B - Next': 'Owner B',
-    'Ordered from Supplier': null
+    'Ordered from Supplier': null,
+    'Awaiting Full Order': null
 };
 
 function item(overrides = {}) {
@@ -296,6 +298,47 @@ test('medianOf handles odd, even, and empty inputs', () => {
     assert.equal(medianOf([3, 1, 2]), 2);
     assert.equal(medianOf([1, 2, 3, 4]), 2.5);
     assert.equal(medianOf([]), null);
+});
+
+test('every ownerless status counts as unowned, not just Ordered from Supplier', () => {
+    const items = [
+        item({ id: '1', name: 'Supplier order', status: 'Ordered from Supplier' }),
+        item({ id: '2', name: 'Awaiting order', status: 'Awaiting Full Order' }),
+        item({ id: '3', name: 'Owned order', status: 'Dept A' })
+    ];
+    const result = compute(items, []);
+    const population = result.populations.fieldService;
+    assert.equal(population.currentOpen, 3);
+    // Both null-mapped statuses are unowned, so neither earns an owner row.
+    assert.equal(population.informationalOpen, 2);
+    assert.equal(population.totals.current, 1);
+    assert.ok(!population.rows['Awaiting Full Order']);
+    const awaiting = population.statusBottlenecks.find(row => row.status === 'Awaiting Full Order');
+    assert.equal(awaiting.supplierWaiting, true);
+});
+
+test('critical lines in an ownerless status report under the no-owner label', () => {
+    const items = [
+        item({ id: '1', name: 'Critical awaiting', status: 'Awaiting Full Order', isCritical: true, priority: 'Critical', ageDays: 20 })
+    ];
+    const critical = compute(items, []).critical;
+    assert.equal(critical.openCritical, 1);
+    assert.deepEqual(critical.topHolders, [{ owner: NO_OWNER_LABEL, count: 1 }]);
+});
+
+test('oldest order age per owner uses order age, not the truncated activity window', () => {
+    const items = [
+        item({ id: '1', name: 'Old order', status: 'Dept A', ageDays: 90, orderDate: new Date('2026-05-07T12:00:00.000Z') }),
+        item({ id: '2', name: 'New order', status: 'Dept A', ageDays: 4 })
+    ];
+    const row = compute(items, []).populations.fieldService.rows['Owner A'];
+    // Waiting time is capped by the 7-day window; order age is not.
+    assert.equal(row.oldestWaitingHours, 48);
+    assert.equal(row.oldestWaitingLowerBound, true);
+    assert.equal(row.oldestOrderAgeDays, 90);
+    assert.equal(row.oldestOrderName, 'Old order');
+    assert.equal(row.oldestOrderDate, '2026-05-07T12:00:00.000Z');
+    assert.equal(compute(items, []).populations.fieldService.totals.oldestOrderAgeDays, 90);
 });
 
 test('dwell before handoff is tracked per owner with lower bounds at the window edge', () => {

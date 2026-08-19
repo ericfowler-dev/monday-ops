@@ -15,6 +15,9 @@
 // Apply:              node backfill-dynamic-history.js --apply
 // Options:            --weeks N   how many earlier weeks to rebuild (default 6)
 //                     --force     overwrite existing keys (default: skip them)
+//                     --include-anchor  also recompute the anchor week itself,
+//                                 needed after an OWNER_MAP change so every
+//                                 charted week uses the same attribution rules
 
 require('dotenv').config();
 
@@ -181,6 +184,7 @@ function trendRows(populationResult) {
     const args = process.argv.slice(2);
     const apply = args.includes('--apply');
     const force = args.includes('--force');
+    const includeAnchor = args.includes('--include-anchor');
     const weeksArg = args.indexOf('--weeks');
     const weeks = weeksArg !== -1 ? Number(args[weeksArg + 1]) : 6;
     if (!Number.isInteger(weeks) || weeks < 1 || weeks > 25) throw new Error('--weeks must be an integer between 1 and 25.');
@@ -202,7 +206,7 @@ function trendRows(populationResult) {
         console.log(`Anchor: ${anchorKey} (generated ${anchorAt.toISOString()})\n`);
 
         const targets = [];
-        for (let i = 1; i <= weeks; i++) {
+        for (let i = includeAnchor ? 0 : 1; i <= weeks; i++) {
             const refDate = new Date(anchorAt.getTime() - i * WINDOW_MS);
             targets.push({ refDate, fromDate: new Date(refDate.getTime() - WINDOW_MS), key: formatDateKey(refDate) });
         }

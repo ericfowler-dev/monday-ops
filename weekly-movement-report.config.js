@@ -38,22 +38,26 @@ module.exports = {
     //   string                  same owner for SNAP and Field Service lines
     //   { snap, fieldService }  split ownership by population
     //   null                    informational status - no owner, reported on its own row
+    // Mirrors the "Who owns what — by Current Dept / Status" table Richard
+    // published in his 8/17 analysis. Where he names a primary owner plus
+    // collaborators, the primary owner carries the accountability (his own
+    // scorecard scores it that way); collaborators are noted in comments.
     OWNER_MAP: {
         'New Item - Requires Assignment': 'Vanessa Bonilla-Aguirre',
         'Purchasing': 'Jack Richards',
+        'In PC': 'Jack Richards', // hands off to Pick/Materials once back from PC
         'FAB': 'Jessica Hernandez',
         'Beloit WH': 'Mark Rodriguez',
-        'In PC': 'Jessica Sanchez',
-        'Pick/Materials (Darien)': 'Jessica Sanchez',
-        'Staged in Darien': 'Jessica Sanchez',
-        'Shipped to Darien': 'Jessica Sanchez',
-        'Approved for Shipment': 'Jessica Sanchez',
+        'Pick/Materials (Darien)': 'Mark Rodriguez', // with Jessica Sanchez and Stacie Knutsen
+        'Shipped to Darien': 'Mark Rodriguez', // with Jessica Sanchez and Stacie Knutsen
+        'Staged in Darien': 'Thania Sandoval',
+        'Shipment Complication': 'Thania Sandoval',
+        'Approved for Shipment': 'Jessica Sanchez', // after Thania provides a DDL pick-up date
         'Project Management': 'Clare Heckert',
         'Customer Supplied': 'Fernando Morales',
         'Field Service': 'Ambrea Ayala',
-        'Shipment Complication': 'Thania Sandoval',
         'Pending Shipment Approval': { snap: 'Clare Heckert', fieldService: 'Ambrea Ayala' },
-        'Awaiting Full Order': { snap: 'Clare Heckert', fieldService: 'Ambrea Ayala' },
-        'Ordered from Supplier': null
+        'Awaiting Full Order': null, // nothing moves until the full order is ready
+        'Ordered from Supplier': null // supplier lead time, not anyone's queue
     }
 };
