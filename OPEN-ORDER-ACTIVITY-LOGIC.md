@@ -26,17 +26,17 @@ Those values may be different and are deliberately reported separately.
 | Purchasing | Jack Richards | Jack Richards |
 | FAB | Jessica Hernandez | Jessica Hernandez |
 | Beloit WH | Mark Rodriguez | Mark Rodriguez |
-| In PC | Jessica Sanchez | Jessica Sanchez |
-| Pick/Materials (Darien) | Jessica Sanchez | Jessica Sanchez |
-| Staged in Darien | Jessica Sanchez | Jessica Sanchez |
-| Shipped to Darien | Jessica Sanchez | Jessica Sanchez |
+| In PC | Jack Richards | Jack Richards |
+| Pick/Materials (Darien) | Mark Rodriguez | Mark Rodriguez |
+| Staged in Darien | Thania Sandoval | Thania Sandoval |
+| Shipped to Darien | Mark Rodriguez | Mark Rodriguez |
 | Approved for Shipment | Jessica Sanchez | Jessica Sanchez |
 | Project Management | Clare Heckert | Clare Heckert |
 | Customer Supplied | Fernando Morales | Fernando Morales |
 | Field Service | Ambrea Ayala | Ambrea Ayala |
 | Shipment Complication | Thania Sandoval | Thania Sandoval |
 | Pending Shipment Approval | Clare Heckert | Ambrea Ayala |
-| Awaiting Full Order | Clare Heckert | Ambrea Ayala |
+| Awaiting Full Order | Informational—no person exception | Informational—no person exception |
 | Ordered from Supplier | Informational—no person exception | Informational—no person exception |
 | Shipped | Closed | Closed |
 | Cancelled | Closed (excluded from open orders; Eric 8/18) | Closed (excluded from open orders; Eric 8/18) |
@@ -75,7 +75,7 @@ An order can credit multiple owners during the same week when each owner acts du
 
 | Metric | Definition |
 |---|---|
-| Current open | Unique open orders currently in the population, including informational supplier-waiting stages |
+| Current open | Unique open orders currently in the population, including the unowned stages (Ordered from Supplier, Awaiting Full Order) |
 | Received | Distinct owner-item relationships newly assigned during the seven-day window |
 | Actioned | Distinct owner-item relationships with at least one qualifying action during the window |
 | Handed off (briefly "Moved Onward"; reverted per stakeholder feedback 8/10) | Distinct owner-item relationships that transitioned to another owner, outside group, informational stage, or closed stage |
@@ -86,12 +86,13 @@ An order can credit multiple owners during the same week when each owner acts du
 | Activity coverage | Current assigned relationships with at least one qualifying action in the seven-day window, divided by current assigned relationships |
 | Closed / shipped | Unique orders that transitioned to a closed status while in the population during the window |
 | 7-day activity rate (was % acted) | Actioned divided by eligible owner-item relationships (actioned during the window or currently waiting >24h), each relationship counted once |
-| Aging distribution | Current assigned relationships bucketed by order age (Order Date, falling back to creation date); supplier-waiting items excluded |
+| Aging distribution | Current assigned relationships bucketed by order age (Order Date, falling back to creation date); unowned stages excluded |
 | Where work is stuck | Current open work grouped by status with waiting counts, waiting %, median time since activity, and oldest order age (top 6 statuses shown) |
-| Critical lines open | Open items in either population whose Priority matches the critical regex; "most critical lines held" credits the accountable owner of the current assignment (supplier-waiting criticals report under Ordered from Supplier) |
+| Critical lines open | Open items in either population whose Priority matches the critical regex; "most critical lines held" credits the accountable owner of the current assignment (criticals in an unowned stage report under "Ordered from Supplier / Awaiting Full Order") |
 | Avg critical age | Mean order age of open critical lines that have an order/creation date |
 | Avg shipment closure | Mean of (Date Shipped − Order Date, falling back to creation date) across orders closed this period; orders missing either date count as closed but not measurable |
 | Median dwell | Median time an order sat with an owner before they handed it off this week; `≥` marks episodes that began at the window edge |
+| Oldest order | Greatest order age among an owner's current items, with the order date. Unlike waiting/dwell this comes from the Order Date column, so it is NOT truncated by the seven-day window — it is the direct equivalent of the "Oldest" column in Richard's analysis |
 | Weekly actioned trend | Per-person actioned counts per stored weekly snapshot (both populations combined), current week appended; hidden until `TREND_MIN_WEEKS` weeks exist, showing at most `TREND_MAX_WEEKS` |
 
 Any duration marked `≥` is a lower bound: the report reads seven days of history, so quiet items may have been waiting longer than shown.
@@ -135,3 +136,11 @@ npm run movement:dynamic-preview
 ```
 
 Render supports manual cron runs from the `weekly-movement-report` service's **Runs** page using **Trigger Run**. The deployed command is `node generate-dynamic-owner-preview.js --send`; it emails the dynamic report with subject `Open Order Workflow Movement Report MM/DD/YYYY`. Of the two Monday UTC cron invocations used for daylight-saving coverage, only the one corresponding to 5:00 AM America/Chicago sends. A Trigger Run outside that scheduled window is treated as manual and sends immediately. Delivery runs also store the weekly snapshot (see section 5); confirm `REDIS_URL` is populated on the Render service or snapshots land on the ephemeral disk and are lost.
+
+### Ownership map alignment (2026-08-19)
+
+`OWNER_MAP` now mirrors the "Who owns what — by Current Dept / Status" table Richard published in his 8/17 analysis, so this report and his manual email attribute the same work to the same people. Changes made: In PC → Jack Richards, Pick/Materials (Darien) → Mark Rodriguez, Shipped to Darien → Mark Rodriguez, Staged in Darien → Thania Sandoval (all four previously credited Jessica Sanchez), and Awaiting Full Order became informational (previously Clare Heckert / Ambrea Ayala).
+
+Where Richard names a primary owner plus collaborators — Pick/Materials and Shipped to Darien are "Mark Rodriguez with Jessica Sanchez and Stacie Knutsen" — the primary owner carries the accountability, matching how his own scorecard scores those rows. The collaborators are recorded as comments in the config. Stacie Knutsen owns no status outright and therefore never appears as an owner.
+
+Two statuses are now ownerless rather than one, so "informational" is resolved through the owner map (any status mapped to `null`) instead of matching the single string "Ordered from Supplier". Where they are reported together the label is "Ordered from Supplier / Awaiting Full Order", matching Richard's combined row.

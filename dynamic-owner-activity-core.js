@@ -4,6 +4,10 @@
 
 const movementCore = require('./weekly-movement-core');
 
+// Statuses mapped to null in OWNER_MAP carry no owner. Richard's analysis groups
+// them as one row; this is the label used wherever they are reported together.
+const NO_OWNER_LABEL = 'Ordered from Supplier / Awaiting Full Order';
+
 function parseActivityTimestamp(value) {
     const timestamp = Number(value);
     if (!Number.isFinite(timestamp)) return null;
@@ -133,6 +137,10 @@ function computeDynamicOwnerActivity({
         if (groupId === snapGroupId && (item.isSnapOrder ?? item.population === 'snap')) return 'snap';
         return null;
     };
+    // More than one status can be informational (supplier lead time, awaiting a
+    // full order), so ask the owner map rather than string-matching one label.
+    const isInformational = (status, population) =>
+        movementCore.ownerFor(status || 'Unassigned', population, ownerMap).informational === true;
     const ownerFor = (status, population) => {
         if (!population || isClosed(status)) return null;
         const label = movementCore.bucketLabelFor(status || 'Unassigned', population, ownerMap);
@@ -263,8 +271,8 @@ function computeDynamicOwnerActivity({
     }
 
     const populations = {
-        snap: aggregatePopulation('snap', pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItemsByPopulation.snap, dwellByOwner),
-        fieldService: aggregatePopulation('fieldService', pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItemsByPopulation.fieldService, dwellByOwner)
+        snap: aggregatePopulation('snap', pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItemsByPopulation.snap, dwellByOwner, isInformational),
+        fieldService: aggregatePopulation('fieldService', pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItemsByPopulation.fieldService, dwellByOwner, isInformational)
     };
     const actorRows = [...actors.values()].map(actor => ({
         userId: actor.userId,
@@ -299,7 +307,7 @@ function computeDynamicOwnerActivity({
         eventAttributions,
         currentAssignments,
         executive: buildExecutiveSummary(populations),
-        critical: buildCriticalSummary({ items, currentAssignments }),
+        critical: buildCriticalSummary({ items, currentAssignments, isInformational }),
         closure: buildClosureStats({
             items,
             closedItemIds: new Set([...closedItemsByPopulation.snap, ...closedItemsByPopulation.fieldService]),
@@ -325,6 +333,7 @@ function startEpisode(item, population, owner, startedAt, received) {
         itemUrl: item.url || '',
         status: item.status,
         ageDays: item.ageDays,
+        orderDate: item.orderDate || null,
         population,
         owner,
         startedAt,
@@ -422,7 +431,7 @@ function recordHandoff(handoffs, population, source, destination, itemId) {
     row.itemIds.add(String(itemId));
 }
 
-function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItems, dwellByOwner) {
+function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItems, dwellByOwner, isInformational) {
     const populationPairs = [...pairs.values()].filter(pair => pair.population === population);
     const rows = {};
     const rowFor = owner => rows[owner] || (rows[owner] = {
@@ -445,7 +454,12 @@ function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs
         activityEvents: 0,
         oldestWaitingHours: null,
         oldestWaitingName: '',
-        oldestWaitingLowerBound: false
+        oldestWaitingLowerBound: false,
+        // Order age comes from the Order Date column, so unlike waiting time it
+        // is never truncated by the seven-day activity window.
+        oldestOrderAgeDays: null,
+        oldestOrderName: '',
+        oldestOrderDate: null
     });
     const attention = [];
     const currentWaitsByOwner = new Map();
@@ -458,6 +472,11 @@ function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs
         if (pair.current) {
             row.current += 1;
             if (pair.actioned) row.actionedCurrent += 1;
+            if (Number.isFinite(pair.ageDays) && (row.oldestOrderAgeDays === null || pair.ageDays > row.oldestOrderAgeDays)) {
+                row.oldestOrderAgeDays = pair.ageDays;
+                row.oldestOrderName = pair.itemName;
+                row.oldestOrderDate = pair.orderDate ? new Date(pair.orderDate).toISOString() : null;
+            }
             if (!currentWaitsByOwner.has(pair.owner)) currentWaitsByOwner.set(pair.owner, []);
             // A wait measured from an in-window action is exact; only pairs pinned
             // to the window edge with no recorded action are true lower bounds.
@@ -521,6 +540,9 @@ function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs
     const allWaits = [...currentWaitsByOwner.values()].flat();
     totals.medianWaitHours = medianOf(allWaits.map(wait => wait.hours));
     totals.medianWaitLowerBound = allWaits.some(wait => wait.lowerBound);
+    totals.oldestOrderAgeDays = Object.values(rows).reduce((oldest, row) =>
+        row.oldestOrderAgeDays !== null && (oldest === null || row.oldestOrderAgeDays > oldest)
+            ? row.oldestOrderAgeDays : oldest, null);
     totals.unmappedCurrent = rows[movementCore.UNMAPPED_LABEL]?.current || 0;
 
     const populationHandoffs = [...handoffs.values()].filter(row => row.population === population)
@@ -529,8 +551,7 @@ function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs
     attention.sort((a, b) => b.waitingHours - a.waitingHours || a.name.localeCompare(b.name));
     const currentItems = items.filter(item => item.population === population && item.isOpen);
     const currentOpen = currentItems.length;
-    const informationalOpen = currentItems.filter(item => movementCore.normalizeText(item.status).toLowerCase()
-        === movementCore.INFORMATIONAL_LABEL.toLowerCase()).length;
+    const informationalOpen = currentItems.filter(item => isInformational(item.status, population)).length;
     const currentPairs = populationPairs.filter(pair => pair.current);
 
     return {
@@ -544,7 +565,7 @@ function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs
         waitingHours,
         closedOrders: closedItems ? closedItems.size : 0,
         agingBuckets: buildAgingBuckets(currentPairs),
-        statusBottlenecks: buildStatusBottlenecks(currentItems, currentPairs)
+        statusBottlenecks: buildStatusBottlenecks(currentItems, currentPairs, population, isInformational)
     };
 }
 
@@ -568,7 +589,7 @@ function buildAgingBuckets(currentPairs) {
     return { buckets, unknownAge: total - aged.length, total };
 }
 
-function buildStatusBottlenecks(currentItems, currentPairs) {
+function buildStatusBottlenecks(currentItems, currentPairs, population, isInformational) {
     const byStatus = new Map();
     const rowFor = status => {
         const key = movementCore.normalizeText(status).toLowerCase();
@@ -580,7 +601,7 @@ function buildStatusBottlenecks(currentItems, currentPairs) {
             medianSinceActivityHours: null,
             medianLowerBound: false,
             oldestAgeDays: null,
-            supplierWaiting: movementCore.normalizeText(status).toLowerCase() === movementCore.INFORMATIONAL_LABEL.toLowerCase(),
+            supplierWaiting: isInformational(status, population),
             waits: []
         });
         return byStatus.get(key);
@@ -650,7 +671,7 @@ function buildExecutiveSummary(populations) {
 // Critical lines (Priority column) across both populations. Holder is the
 // accountable owner of the current assignment; supplier-waiting criticals are
 // reported honestly under the informational label rather than a person.
-function buildCriticalSummary({ items, currentAssignments }) {
+function buildCriticalSummary({ items, currentAssignments, isInformational }) {
     const assignmentByItem = new Map((currentAssignments || []).map(pair => [pair.itemId, pair]));
     const critical = items.filter(item => item.isOpen && item.population && item.isCritical);
     const holders = new Map();
@@ -659,10 +680,11 @@ function buildCriticalSummary({ items, currentAssignments }) {
     for (const item of critical) {
         perPopulation[item.population] += 1;
         if (Number.isFinite(item.ageDays)) ages.push(item.ageDays);
-        const supplierWaiting = movementCore.normalizeText(item.status).toLowerCase()
-            === movementCore.INFORMATIONAL_LABEL.toLowerCase();
+        const unowned = isInformational
+            ? isInformational(item.status, item.population)
+            : movementCore.normalizeText(item.status).toLowerCase() === movementCore.INFORMATIONAL_LABEL.toLowerCase();
         const holder = assignmentByItem.get(item.id)?.owner
-            || (supplierWaiting ? movementCore.INFORMATIONAL_LABEL : movementCore.UNMAPPED_LABEL);
+            || (unowned ? NO_OWNER_LABEL : movementCore.UNMAPPED_LABEL);
         holders.set(holder, (holders.get(holder) || 0) + 1);
     }
     const maxHeld = Math.max(0, ...holders.values());
@@ -761,7 +783,7 @@ function buildActionedTrend({ historyWeeks, currentWeekKey, currentResult, maxWe
 
 // Weekly snapshot record (spec §15): persisted so trend sections and true
 // dwell/return-loop metrics can be added once history accrues.
-function buildWeeklySnapshot({ result, items, refDate }) {
+function buildWeeklySnapshot({ result, items, refDate, isInformational }) {
     const assignmentByItem = new Map(result.currentAssignments.map(pair => [pair.itemId, pair]));
     const liteRows = rows => Object.fromEntries(Object.entries(rows).map(([owner, row]) => [owner, {
         current: row.current,
@@ -806,8 +828,9 @@ function buildWeeklySnapshot({ result, items, refDate }) {
                 status: item.status,
                 groupId: item.groupId,
                 open: true,
-                supplierWaiting: movementCore.normalizeText(item.status).toLowerCase()
-                    === movementCore.INFORMATIONAL_LABEL.toLowerCase(),
+                supplierWaiting: isInformational
+                    ? isInformational(item.status, item.population)
+                    : movementCore.normalizeText(item.status).toLowerCase() === movementCore.INFORMATIONAL_LABEL.toLowerCase(),
                 lastQualifyingActivityAt: pair ? pair.lastActionAt : null,
                 waitingHours: pair ? Math.round(pair.waitingHours * 10) / 10 : null,
                 waitingLowerBound: pair ? pair.waitingLowerBound : false,
@@ -839,6 +862,7 @@ function toDate(value) {
 }
 
 module.exports = {
+    NO_OWNER_LABEL,
     parseActivityTimestamp,
     comparableValue,
     normalizeBoardActivityLogs,
