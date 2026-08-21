@@ -458,7 +458,7 @@ function renderOwnerTrend(trend) {
         return `<tr><td style="${td()}font-weight:700">${escapeHtml(row.owner)}</td>${cells}<td align="right" style="${td()}font-weight:800">${row.total}</td></tr>`;
     }).join('');
     return `${sectionTitle('Weekly actioned trend', subtitle)}
-    <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">Owner</th>${headers}<th align="right" style="${lightTh()}">Total</th></tr>${body || emptyRow(trend.weekKeys.length + 2, 'No owner activity recorded yet.')}</table></td></tr>`;
+    <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">Person</th>${headers}<th align="right" style="${lightTh()}">Total</th></tr>${body || emptyRow(trend.weekKeys.length + 2, 'No owner activity recorded yet.')}</table></td></tr>`;
 }
 
 function heatColors(count, max) {
