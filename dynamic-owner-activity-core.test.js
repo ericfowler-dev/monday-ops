@@ -472,6 +472,24 @@ test('actor rows count distinct orders, not raw edits', () => {
     assert.equal(jack.handedOff, 0);
 });
 
+test('excluded actors are dropped at normalization so no metric ever sees them', () => {
+    const stamp = String(Date.parse('2026-08-04T12:00:00.000Z') * 10000);
+    const data = column => JSON.stringify({
+        pulse_id: 1, pulse_name: 'Order 1', group_id: 'field', column_id: column,
+        previous_value: { label: { text: 'Dept A' } }, value: { label: { text: 'Dept B' } }
+    });
+    const logs = [
+        { id: 'human', event: 'update_column_value', data: data('status'), created_at: stamp, user_id: '77' },
+        { id: 'robot', event: 'update_column_value', data: data('status'), created_at: stamp, user_id: '-4' }
+    ];
+    const columns = [{ id: 'status', title: 'Current Dept / Status', kind: 'status', category: 'workflow' }];
+    const all = normalizeBoardActivityLogs(logs, columns);
+    assert.equal(all.length, 2);
+    const filtered = normalizeBoardActivityLogs(logs, columns, { excludedActorIds: ['-4'] });
+    assert.equal(filtered.length, 1);
+    assert.equal(filtered[0].actorUserId, '77');
+});
+
 test('automation and unknown actors are filtered out of person reporting', () => {
     const rows = [
         { userId: 'jack', actioned: 5 },

@@ -56,7 +56,7 @@ async function generateReport() {
         fetchCurrentRelevantItems(),
         fetchBoardActivity(fromDate, now)
     ]);
-    const allEvents = normalizeBoardActivityLogs(rawLogs, QUALIFYING_COLUMNS);
+    const allEvents = normalizeBoardActivityLogs(rawLogs, QUALIFYING_COLUMNS, { excludedActorIds: config.EXCLUDED_ACTOR_IDS });
     const relevantGroups = new Set([config.SNAP_GROUP_ID, config.FIELD_SERVICE_GROUP_ID]);
     const knownIds = new Set(currentRawItems.map(item => String(item.id)));
     const historicalCandidateIds = [...new Set(allEvents
@@ -315,7 +315,7 @@ function renderHtml(data) {
       ${renderOwnerDetail('Factory SNAP', result.populations.snap)}
       ${renderOwnerDetail('Field Service', result.populations.fieldService)}
       <tr><td style="padding:19px 28px;background:#e8eef8;color:#475569;font-size:11px;line-height:17px">
-        <b>How to read this report:</b> Owner metrics count distinct owner–item relationships (owner–item pairs), so one order can credit two owners after a handoff; “Current open” counts unique orders. Credit follows the accountable department owner — status, fulfillment, supplier, and shipping changes qualify, cosmetic edits do not. “Waiting” means no qualifying action for 24+ hours; durations marked “≥” are lower bounds because the report reads seven days of history. Click any order name to open it in monday.com.${data.send ? '' : ' Preview only: no email was sent and no history was stored.'}
+        <b>How to read this report:</b> Owner metrics count distinct owner–item relationships (owner–item pairs), so one order can credit two owners after a handoff; “Current open” counts unique orders. Status, fulfillment, supplier, and shipping changes qualify; cosmetic edits and automated board updates do not count anywhere in this report. “Waiting” means no qualifying action for 24+ hours; durations marked “≥” are lower bounds because the report reads seven days of history. Click any order name to open it in monday.com.${data.send ? '' : ' Preview only: no email was sent and no history was stored.'}
       </td></tr>
     </table></td></tr></table></body></html>`;
 }

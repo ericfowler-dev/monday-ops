@@ -178,3 +178,28 @@ each snapshot (`populations.*.actorRows`). Weeks stored before this change carry
 owner rows and are **skipped** by the trend rather than mixed with actor rows — re-run
 `backfill-dynamic-history.js --force --include-anchor --apply` after deploying this
 change, or the trend will show only the live column.
+
+### Automation is excluded everywhere (2026-08-21, Eric)
+
+Monday's automation user (`-4`) is dropped at normalization via
+`normalizeBoardActivityLogs(logs, columns, { excludedActorIds })`, so its changes never
+reach attribution, waiting clocks, counts, the trend, or the data-quality card. This is
+a report about what people did.
+
+Measured impact on the week of 8/21 — automation produced 496 of 1,725 qualifying
+events (29%), including 212 status transitions (108 `Unassigned -> New Item - Requires
+Assignment`, 41 `Staged in Darien -> Pending Shipment Approval`, 19
+`Pending Shipment Approval -> Approved for Shipment`):
+
+| Metric | With automation | Excluded |
+|---|---|---|
+| SNAP actioned / handed off | 137 / 132 | 130 / 121 |
+| Field Service actioned / handed off | 255 / 228 | 221 / 159 |
+| Waiting >24h (both) | 148 / 101 | **unchanged** |
+| Closed, orders touched | 24 / 10, 293 | **unchanged** |
+
+Waiting is unchanged, so nothing falsely appears stalled. The visible cost is that
+queue-level "Handed off" understates real workflow movement — Field Service drops
+228 → 159 because automation performs roughly a third of stage transitions, and those
+orders genuinely did move. That is the accepted trade for keeping automation out of
+the numbers entirely.

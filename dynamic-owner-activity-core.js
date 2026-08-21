@@ -15,14 +15,19 @@ function parseActivityTimestamp(value) {
     return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function normalizeBoardActivityLogs(logs, qualifyingColumns) {
+// excludedActorIds drops those users' changes at the source, so nothing downstream
+// — credit, waiting clocks, counts, data quality — ever sees them. Used to keep
+// Monday's automation out of a report about what people did.
+function normalizeBoardActivityLogs(logs, qualifyingColumns, { excludedActorIds = [] } = {}) {
     const columnMap = new Map(qualifyingColumns.map(column => [column.id, column]));
+    const excluded = new Set(excludedActorIds.map(String));
     const seen = new Set();
     const events = [];
 
     for (const log of logs || []) {
         const id = String(log.id || '');
         if (id && seen.has(id)) continue;
+        if (excluded.has(movementCore.normalizeText(log.user_id))) continue;
         let data;
         try { data = JSON.parse(log.data); } catch { continue; }
         const at = parseActivityTimestamp(log.created_at);

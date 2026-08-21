@@ -243,7 +243,7 @@ function actorRowsFor(populationResult, userNames) {
         const now = new Date();
         console.log(`\nFetching board items and activity from ${oldest.toISOString().slice(0, 10)} to now...`);
         const [currentRaw, rawLogs] = await Promise.all([fetchCurrentRelevantItems(), fetchActivityRange(oldest, now)]);
-        const allEvents = normalizeBoardActivityLogs(rawLogs, QUALIFYING_COLUMNS);
+        const allEvents = normalizeBoardActivityLogs(rawLogs, QUALIFYING_COLUMNS, { excludedActorIds: config.EXCLUDED_ACTOR_IDS });
 
         // Items that have since left the report groups still matter historically.
         const relevantGroups = new Set([config.SNAP_GROUP_ID, config.FIELD_SERVICE_GROUP_ID]);
