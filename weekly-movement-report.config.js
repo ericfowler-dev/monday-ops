@@ -32,6 +32,10 @@ module.exports = {
     TREND_MIN_WEEKS: 2,
     TREND_MAX_WEEKS: 8,
 
+    // Monday's built-in automation actor. It generates more board changes than any
+    // person, so it is kept out of person-level scorecards and the weekly trend.
+    EXCLUDED_ACTOR_IDS: ['-4'],
+
     // The board has no Owner column, so ownership follows Current Dept / Status.
     // Confirmed with Ambrea (Richard's 8/4 email); Shipment Complication added
     // per Eric 8/18. Values:

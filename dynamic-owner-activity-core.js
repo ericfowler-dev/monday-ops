@@ -126,6 +126,9 @@ function computeDynamicOwnerActivity({
     const actors = new Map();
     const handoffs = new Map();
     const dwellByOwner = new Map();
+    // Per-population, per-person record of who physically made the changes. The
+    // owner tables answer "whose queue is this"; this answers "who did the work".
+    const actorWork = new Map();
     const activityBreakdown = new Map();
     const eventAttributions = [];
     const modelledItemIds = new Set();
@@ -189,6 +192,7 @@ function computeDynamicOwnerActivity({
                     attribution.creditOwner = currentEpisode.owner;
                     attribution.creditPopulation = currentEpisode.population;
                     actionEpisode(currentEpisode, event);
+                    recordActorWork(actorWork, eventPopulation, event, item.id, false);
                     mergePair(pairs, currentEpisode);
                 } else {
                     attribution.reason = 'outside-report-group';
@@ -203,6 +207,7 @@ function computeDynamicOwnerActivity({
                     attribution.creditPopulation = currentEpisode.population;
                     actionEpisode(currentEpisode, event);
                     const nextOwner = ownerFor(event.nextStatus, population);
+                    recordActorWork(actorWork, population, event, item.id, nextOwner !== currentEpisode.owner);
                     if (nextOwner !== currentEpisode.owner) {
                         currentEpisode.handedOff = true;
                         currentEpisode.current = false;
@@ -231,6 +236,7 @@ function computeDynamicOwnerActivity({
                     attribution.creditOwner = currentEpisode.owner;
                     attribution.creditPopulation = currentEpisode.population;
                     actionEpisode(currentEpisode, event);
+                    recordActorWork(actorWork, sourcePopulation, event, item.id, true);
                     currentEpisode.handedOff = true;
                     currentEpisode.current = false;
                     mergePair(pairs, currentEpisode);
@@ -271,8 +277,8 @@ function computeDynamicOwnerActivity({
     }
 
     const populations = {
-        snap: aggregatePopulation('snap', pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItemsByPopulation.snap, dwellByOwner, isInformational),
-        fieldService: aggregatePopulation('fieldService', pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItemsByPopulation.fieldService, dwellByOwner, isInformational)
+        snap: aggregatePopulation('snap', pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItemsByPopulation.snap, dwellByOwner, isInformational, actorWork),
+        fieldService: aggregatePopulation('fieldService', pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItemsByPopulation.fieldService, dwellByOwner, isInformational, actorWork)
     };
     const actorRows = [...actors.values()].map(actor => ({
         userId: actor.userId,
@@ -423,6 +429,40 @@ function recordDwell(dwellByOwner, population, owner, handedOffAt, episode) {
     });
 }
 
+// Credits the Monday user who actually performed the change, per population.
+// Counted as distinct orders, so a person who edits one order ten times scores 1.
+function recordActorWork(actorWork, population, event, itemId, handedOff) {
+    if (!population) return;
+    if (!actorWork.has(population)) actorWork.set(population, new Map());
+    const byActor = actorWork.get(population);
+    const actorId = event.actorUserId || 'unknown';
+    if (!byActor.has(actorId)) byActor.set(actorId, { actioned: new Set(), handedOff: new Set(), events: 0 });
+    const row = byActor.get(actorId);
+    row.events += 1;
+    row.actioned.add(String(itemId));
+    if (handedOff) row.handedOff.add(String(itemId));
+}
+
+// Monday's automation actor generates more changes than any person, so it is
+// excluded from person-level reporting rather than winning "top mover".
+function filterActorRows(actorRows, excludedActorIds) {
+    const excluded = new Set([...(excludedActorIds || []), 'unknown'].map(String));
+    return (actorRows || []).filter(row => !excluded.has(String(row.userId)));
+}
+
+function buildActorRows(actorWork, population) {
+    const byActor = actorWork && actorWork.get(population);
+    if (!byActor) return [];
+    return [...byActor.entries()]
+        .map(([userId, row]) => ({
+            userId,
+            actioned: row.actioned.size,
+            handedOff: row.handedOff.size,
+            events: row.events
+        }))
+        .sort((a, b) => b.actioned - a.actioned || b.handedOff - a.handedOff || a.userId.localeCompare(b.userId));
+}
+
 function recordHandoff(handoffs, population, source, destination, itemId) {
     const key = `${population}\u0000${source}\u0000${destination}`;
     if (!handoffs.has(key)) handoffs.set(key, { population, source, destination, events: 0, itemIds: new Set() });
@@ -431,7 +471,7 @@ function recordHandoff(handoffs, population, source, destination, itemId) {
     row.itemIds.add(String(itemId));
 }
 
-function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItems, dwellByOwner, isInformational) {
+function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs, waitingHours, pastDueDays, closedItems, dwellByOwner, isInformational, actorWork) {
     const populationPairs = [...pairs.values()].filter(pair => pair.population === population);
     const rows = {};
     const rowFor = owner => rows[owner] || (rows[owner] = {
@@ -560,6 +600,7 @@ function aggregatePopulation(population, pairs, items, modelledItemIds, handoffs
         attention,
         handoffs: populationHandoffs,
         topActionedOwners,
+        actorRows: buildActorRows(actorWork, population),
         currentOpen,
         informationalOpen,
         waitingHours,
@@ -745,34 +786,46 @@ function weekdayOfDateKey(dateKey) {
 // week apart double-count the same activity. When snapshotWeekday is supplied,
 // only keys written on that weekday are charted — off-schedule keys (from test
 // runs or a mis-set cron) are ignored rather than inflating the totals.
-function buildActionedTrend({ historyWeeks, currentWeekKey, currentResult, maxWeeks = 8, snapshotWeekday = null }) {
+function buildActionedTrend({ historyWeeks, currentWeekKey, currentResult, maxWeeks = 8, snapshotWeekday = null, userNames = null, excludedActorIds = null }) {
     const onSchedule = key => snapshotWeekday === null || weekdayOfDateKey(key) === snapshotWeekday;
+    // Weeks stored before the switch to actor-based credit carry only owner rows.
+    // Charting them beside actor rows would mix two different measures, so skip them.
+    const hasActorRows = week => ['snap', 'fieldService'].some(pop => week.populations?.[pop]?.actorRows);
     const stored = Object.entries(historyWeeks || {})
-        .filter(([key, week]) => key < currentWeekKey && week && week.populations && onSchedule(key))
+        .filter(([key, week]) => key < currentWeekKey && week && week.populations && onSchedule(key) && hasActorRows(week))
         .sort(([a], [b]) => a.localeCompare(b))
         .slice(-(Math.max(1, maxWeeks) - 1));
     const columns = [
         ...stored.map(([key, week]) => ({ key, populations: week.populations })),
         { key: currentWeekKey, populations: currentResult.populations }
     ];
-    const actionedFor = (populations, owner) => ['snap', 'fieldService'].reduce((total, population) => {
-        const row = populations?.[population]?.rows?.[owner];
+    // Rows are people who made changes, keyed by Monday user id and labelled with
+    // the display name stored alongside it, so the trend matches the scorecard.
+    // Stored weeks carry resolved names; the live week is filtered and named here.
+    const rowsFor = (populations, population) => {
+        const rows = populations?.[population]?.actorRows || [];
+        return populations === currentResult.populations ? filterActorRows(rows, excludedActorIds) : rows;
+    };
+    const nameOf = row => row.name || (userNames && userNames.get(String(row.userId))) || String(row.userId);
+    const actionedFor = (populations, userId) => ['snap', 'fieldService'].reduce((total, population) => {
+        const row = rowsFor(populations, population).find(entry => String(entry.userId) === userId);
         return total + (row && Number.isFinite(row.actioned) ? row.actioned : 0);
     }, 0);
-    const ownerNames = new Set();
+    const labels = new Map();
     for (const column of columns) {
         for (const population of ['snap', 'fieldService']) {
-            for (const owner of Object.keys(column.populations?.[population]?.rows || {})) {
-                if (owner !== movementCore.UNMAPPED_LABEL && owner !== movementCore.INFORMATIONAL_LABEL) {
-                    ownerNames.add(owner);
-                }
+            for (const row of rowsFor(column.populations, population)) {
+                const userId = String(row.userId);
+                const name = nameOf(row);
+                if (!labels.has(userId) || labels.get(userId) === userId) labels.set(userId, name);
             }
         }
     }
-    const owners = [...ownerNames].map(owner => {
-        const counts = columns.map(column => actionedFor(column.populations, owner));
-        return { owner, counts, total: counts.reduce((a, b) => a + b, 0) };
-    }).sort((a, b) => b.total - a.total || a.owner.localeCompare(b.owner));
+    const owners = [...labels.entries()].map(([userId, name]) => {
+        const counts = columns.map(column => actionedFor(column.populations, userId));
+        return { userId, owner: name, counts, total: counts.reduce((a, b) => a + b, 0) };
+    }).filter(row => row.total > 0)
+        .sort((a, b) => b.total - a.total || a.owner.localeCompare(b.owner));
     return {
         weekKeys: columns.map(column => column.key),
         owners,
@@ -783,7 +836,7 @@ function buildActionedTrend({ historyWeeks, currentWeekKey, currentResult, maxWe
 
 // Weekly snapshot record (spec §15): persisted so trend sections and true
 // dwell/return-loop metrics can be added once history accrues.
-function buildWeeklySnapshot({ result, items, refDate, isInformational }) {
+function buildWeeklySnapshot({ result, items, refDate, isInformational, userNames, excludedActorIds }) {
     const assignmentByItem = new Map(result.currentAssignments.map(pair => [pair.itemId, pair]));
     const liteRows = rows => Object.fromEntries(Object.entries(rows).map(([owner, row]) => [owner, {
         current: row.current,
@@ -805,7 +858,16 @@ function buildWeeklySnapshot({ result, items, refDate, isInformational }) {
         currentOpen: pop.currentOpen,
         informationalOpen: pop.informationalOpen,
         closedOrders: pop.closedOrders,
-        rows: liteRows(pop.rows)
+        rows: liteRows(pop.rows),
+        // Names are resolved here so the trend can label people without re-querying
+        // Monday for user ids that may no longer exist.
+        actorRows: filterActorRows(pop.actorRows, excludedActorIds).map(row => ({
+            userId: row.userId,
+            name: (userNames && userNames.get(row.userId)) || `User ${row.userId}`,
+            actioned: row.actioned,
+            handedOff: row.handedOff,
+            events: row.events
+        }))
     });
     return {
         version: 2,
@@ -863,6 +925,7 @@ function toDate(value) {
 
 module.exports = {
     NO_OWNER_LABEL,
+    filterActorRows,
     parseActivityTimestamp,
     comparableValue,
     normalizeBoardActivityLogs,

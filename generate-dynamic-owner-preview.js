@@ -3,7 +3,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const config = require('./weekly-movement-report.config');
-const { normalizeBoardActivityLogs, computeDynamicOwnerActivity, buildWeeklySnapshot, buildActionedTrend } = require('./dynamic-owner-activity-core');
+const { normalizeBoardActivityLogs, computeDynamicOwnerActivity, buildWeeklySnapshot, buildActionedTrend, filterActorRows } = require('./dynamic-owner-activity-core');
 const { pruneWeeks, ownerFor } = require('./weekly-movement-core');
 const { createHistoryStore } = require('./dynamic-owner-history-store');
 
@@ -103,17 +103,17 @@ async function generateReport() {
     if (deliveryMode && !dryRun) {
         await sendEmail(html, now);
         if (isSnapshotDay(now)) {
-            await persistSnapshot(result, items, now);
+            await persistSnapshot(result, items, now, userNames);
         } else {
             console.log(`Off-schedule run (${config.TIME_ZONE} weekday is not the scheduled day): email sent, weekly snapshot skipped so test runs never pollute trend history.`);
         }
     }
-    logSummary(result, items, events, rawLogs.length, outputPath, deliveryMode, dryRun);
+    logSummary(result, items, events, rawLogs.length, outputPath, deliveryMode, dryRun, userNames);
 }
 
 // Non-fatal by design: the email has already been sent, and trend history can
 // tolerate a missed week better than the report can tolerate a failed run.
-async function persistSnapshot(result, items, now) {
+async function persistSnapshot(result, items, now, userNames) {
     let store;
     try {
         store = await createHistoryStore();
@@ -126,7 +126,9 @@ async function persistSnapshot(result, items, now) {
             items,
             refDate: now,
             isInformational: (status, population) =>
-                ownerFor(status || 'Unassigned', population, config.OWNER_MAP).informational === true
+                ownerFor(status || 'Unassigned', population, config.OWNER_MAP).informational === true,
+            userNames,
+            excludedActorIds: config.EXCLUDED_ACTOR_IDS
         });
         pruneWeeks(history.weeks, config.HISTORY_RETENTION_WEEKS);
         await store.writeHistory(history);
@@ -297,14 +299,16 @@ function renderHtml(data) {
       ${renderDataQuality(result, data)}
       ${renderExecutiveSummary(result.executive)}
       ${renderHighlights(result.critical, result.closure)}
-      ${renderPopulation('Part 1 — Factory SNAP orders', '#2563eb', '#eff6ff', result.populations.snap)}
-      ${renderPopulation('Part 2 — Field Service orders', '#0f766e', '#f0fdfa', result.populations.fieldService)}
+      ${renderPopulation('Part 1 — Factory SNAP orders', '#2563eb', '#eff6ff', result.populations.snap, data.userNames)}
+      ${renderPopulation('Part 2 — Field Service orders', '#0f766e', '#f0fdfa', result.populations.fieldService, data.userNames)}
       ${renderOwnerTrend(buildActionedTrend({
           historyWeeks: data.historyWeeks,
           currentWeekKey: data.currentWeekKey,
           currentResult: result,
           maxWeeks: config.TREND_MAX_WEEKS,
-          snapshotWeekday: config.SCHEDULE_WEEKDAY
+          snapshotWeekday: config.SCHEDULE_WEEKDAY,
+          userNames: data.userNames,
+          excludedActorIds: config.EXCLUDED_ACTOR_IDS
       }))}
       ${renderBottleneck(result.populations)}
       ${renderAgingBuckets(result.populations)}
@@ -392,15 +396,19 @@ function renderHighlights(critical, closure) {
     </tr></table></td></tr>`;
 }
 
-function renderPopulation(title, color, background, population) {
+function renderPopulation(title, color, background, population, userNames) {
     const totals = population.totals;
-    const topOwners = new Set(population.topActionedOwners || []);
-    const rows = Object.entries(population.rows)
+    // Scorecard credits the person who made the change, not the department that
+    // owned the stage — queue accountability lives in the owner detail tables.
+    const rows = filterActorRows(population.actorRows, config.EXCLUDED_ACTOR_IDS)
+        .map(row => [userNames.get(row.userId) || `User ${row.userId}`, row])
         .sort((a, b) => b[1].actioned - a[1].actioned || b[1].handedOff - a[1].handedOff || a[0].localeCompare(b[0]));
+    const maxActioned = Math.max(0, ...rows.map(([, row]) => row.actioned));
     const maxValue = Math.max(1, ...rows.map(([, row]) => Math.max(row.actioned, row.handedOff)));
-    const body = rows.map(([owner, row]) => scoreRow(owner, row, topOwners.has(owner), maxValue)).join('');
+    const body = rows.map(([name, row]) =>
+        scoreRow(name, row, maxActioned > 0 && row.actioned === maxActioned, maxValue)).join('');
     return `<tr><td style="padding:20px 28px 13px;background:${background};border-top:5px solid ${color}">
-      <div style="font-size:20px;font-weight:800">${escapeHtml(title)}</div><div style="margin-top:4px;font-size:12px;color:#526078">Who moved work this week — full per-owner metrics are in the owner detail tables at the end</div>
+      <div style="font-size:20px;font-weight:800">${escapeHtml(title)}</div><div style="margin-top:4px;font-size:12px;color:#526078">Who moved work this week, and how each department's queue is holding up</div>
     </td></tr>
     <tr><td style="padding:14px 24px 6px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
       ${metric('Current open', population.currentOpen, `${population.informationalOpen} unowned (supplier / awaiting full order)`, color)}
@@ -409,9 +417,9 @@ function renderPopulation(title, color, background, population) {
       ${metric('Waiting >24h', totals.waiting, `${pctLabel(totals.waitingPct)} of assigned`, totals.waiting ? '#b91c1c' : '#64748b')}
       ${metric('Closed / shipped', population.closedOrders, 'this period', '#15803d')}
     </tr></table></td></tr>
-    ${sectionTitle('Owner scorecard', 'Two numbers per person: orders they actioned and orders they handed onward this week. ★ marks the top mover.')}
+    ${sectionTitle('Who moved work this week', 'Counts the person who actually made the change, as distinct orders. Actioned = orders they changed; Handed off = orders they moved to the next stage. ★ marks the top mover. Automated board updates are excluded.')}
     <tr><td style="padding:0 28px 20px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed">
-      <tr style="background:#12213f"><th align="left" style="${th()}">Accountable owner</th><th align="right" style="${th()}width:60px">Actioned</th><th align="left" style="${th()}width:160px"></th><th align="right" style="${th()}width:70px">Handed off</th><th align="left" style="${th()}width:160px"></th></tr>
+      <tr style="background:#12213f"><th align="left" style="${th()}">Person</th><th align="right" style="${th()}width:60px">Actioned</th><th align="left" style="${th()}width:160px"></th><th align="right" style="${th()}width:70px">Handed off</th><th align="left" style="${th()}width:160px"></th></tr>
       ${body || emptyRow(5, 'No matching owner activity.')}
     </table></td></tr>`;
 }
@@ -431,7 +439,7 @@ function bar(value, max, color, maxPx = 140) {
 }
 
 function renderOwnerTrend(trend) {
-    const subtitle = 'Orders actioned per person per week, both populations combined. Darker cells mean more actions.';
+    const subtitle = 'Orders each person changed per week, both populations combined. Darker cells mean more orders.';
     if (trend.weeksAvailable < config.TREND_MIN_WEEKS) {
         return `${sectionTitle('Weekly actioned trend', subtitle)}
         <tr><td style="padding:0 28px 18px"><div style="padding:11px 14px;background:#f8fafc;border:1px dashed #cbd5e1;color:#64748b;font-size:12px">The per-person weekly trend will appear here once at least ${config.TREND_MIN_WEEKS} weeks of history have accrued (currently ${trend.weeksAvailable}). History is stored each time the report is delivered.</div></td></tr>`;
@@ -476,7 +484,7 @@ function renderOwnerDetail(label, population) {
             : `${row.oldestOrderAgeDays}d${row.oldestOrderDate ? `<div style="font-size:10px;color:#94a3b8">${escapeHtml(formatShortDate(new Date(row.oldestOrderDate)))}</div>` : ''}`;
         return `<tr><td style="${td()}font-weight:700">${escapeHtml(owner)}</td><td align="right" style="${td()}">${dash(row.current)}</td><td align="right" style="${td()}">${dash(row.received)}</td><td align="right" style="${td()}color:${row.netFlow > 0 ? '#b91c1c' : row.netFlow < 0 ? '#15803d' : '#94a3b8'}">${signed(row.netFlow)}</td><td align="right" style="${td()}font-weight:800;color:${row.waiting ? '#b91c1c' : '#94a3b8'}">${dash(row.waiting)}</td><td align="right" style="${td()}">${pctLabel(row.waitingPct)}</td><td align="right" style="${td()}">${median}</td><td align="right" style="${td()}">${dwell}</td><td align="right" style="${td()}">${oldest}</td><td align="right" style="${td()}font-weight:800;color:${row.oldestOrderAgeDays !== null && row.oldestOrderAgeDays > config.PAST_DUE_DAYS ? '#b91c1c' : '#172033'}">${oldestOrder}</td><td align="right" style="${td()}font-weight:800">${row.actionRate === null ? '—' : `${row.actionRate}%`}</td></tr>`;
     }).join('');
-    return `${sectionTitle(`Owner detail — ${label}`, 'The numbers behind the scorecard. Median dwell = typical time an order sat with the owner before hand-off this week (≥ means at least; limited by the 7-day window). Oldest order is true order age and is not window-limited.')}
+    return `${sectionTitle(`Department queue health — ${label}`, 'Load and ageing by the department that owns each stage, regardless of who last touched the order. Median dwell = typical time an order sat with the owner before hand-off this week (≥ means at least; limited by the 7-day window). Oldest order is true order age and is not window-limited.')}
     <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#f7f9fc"><th align="left" style="${lightTh()}">Owner</th><th align="right" style="${lightTh()}">Current</th><th align="right" style="${lightTh()}">Received</th><th align="right" style="${lightTh()}">Net flow</th><th align="right" style="${lightTh()}">Waiting &gt;24h</th><th align="right" style="${lightTh()}">Waiting %</th><th align="right" style="${lightTh()}">Median wait</th><th align="right" style="${lightTh()}">Median dwell</th><th align="right" style="${lightTh()}">Oldest waiting</th><th align="right" style="${lightTh()}">Oldest order</th><th align="right" style="${lightTh()}">7-day activity</th></tr>${body || emptyRow(11, 'No owner assignments.')}</table></td></tr>`;
 }
 function metric(label, value, note, color, width = '20%') { return `<td class="metric" width="${width}" valign="top" style="padding:4px"><div style="padding:13px 12px;border:1px solid #dce3ed;border-top:4px solid ${color}"><div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#64748b">${escapeHtml(label)}</div><div style="font-size:25px;font-weight:800;margin:4px 0">${value}</div><div style="font-size:10px;color:#64748b">${escapeHtml(note)}</div></div></td>`; }
@@ -532,11 +540,13 @@ async function sendEmail(html, now) {
     console.log(`Email sent via Microsoft Graph to ${recipients.join(', ')}.`);
 }
 
-function logSummary(result, items, events, rawLogs, outputPath, send, dryRun) {
+function logSummary(result, items, events, rawLogs, outputPath, send, dryRun, userNames) {
     console.log(`Loaded ${items.length} attributable items, ${rawLogs} board activity records, and ${events.length} qualifying events.`);
     for (const [key, label] of [['snap', 'Factory SNAP'], ['fieldService', 'Field Service']]) {
         const population = result.populations[key];
-        console.log(`${label}: ${population.currentOpen} current; ${population.totals.actioned} owner-item pairs actioned; ${population.totals.waiting} waiting >24h; ${population.totals.handedOff} handed off; net flow ${population.totals.netFlow}; ${population.closedOrders} closed; top mover: ${population.topActionedOwners.join(', ') || 'none'}.`);
+        const people = filterActorRows(population.actorRows, config.EXCLUDED_ACTOR_IDS);
+        const topMover = people.length ? `${userNames.get(people[0].userId) || people[0].userId} (${people[0].actioned})` : 'none';
+        console.log(`${label}: ${population.currentOpen} current; ${population.totals.actioned} owner-item pairs actioned; ${population.totals.waiting} waiting >24h; ${population.totals.handedOff} handed off; net flow ${population.totals.netFlow}; ${population.closedOrders} closed; top mover (person): ${topMover}.`);
     }
     console.log(`People with qualifying activity: ${result.actorRows.length}; orders touched: ${result.distinctItemsWithActivity}.`);
     console.log(`Critical lines open: ${result.critical.openCritical}; avg age ${result.critical.avgAgeDays ?? '—'}d; top holders: ${result.critical.topHolders.map(entry => `${entry.owner} (${entry.count})`).join(', ') || 'none'}.`);
