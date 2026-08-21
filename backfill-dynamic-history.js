@@ -22,7 +22,7 @@
 require('dotenv').config();
 
 const config = require('./weekly-movement-report.config');
-const { normalizeBoardActivityLogs, computeDynamicOwnerActivity } = require('./dynamic-owner-activity-core');
+const { normalizeBoardActivityLogs, computeDynamicOwnerActivity, filterActorRows } = require('./dynamic-owner-activity-core');
 const { createHistoryStore } = require('./dynamic-owner-history-store');
 
 const MONDAY_API_VERSION = process.env.MONDAY_API_VERSION || '2026-07';
@@ -127,6 +127,15 @@ async function fetchActivityRange(fromDate, toDate) {
     return logs;
 }
 
+async function fetchUserNames(ids) {
+    const names = new Map();
+    for (let offset = 0; offset < ids.length; offset += 100) {
+        const data = await mondayQuery('query ($ids: [ID!]) { users(ids: $ids) { id name } }', { ids: ids.slice(offset, offset + 100) });
+        for (const user of data.users || []) names.set(String(user.id), user.name);
+    }
+    return names;
+}
+
 function parseMondayDate(value) {
     const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
     return match ? new Date(Date.UTC(+match[1], +match[2] - 1, +match[3], 12)) : null;
@@ -178,6 +187,18 @@ function trendRows(populationResult) {
         received: row.received,
         handedOff: row.handedOff
     }]));
+}
+
+// The trend charts the person who made each change, so rebuilt weeks must carry
+// actor rows with names resolved, exactly as a live snapshot would.
+function actorRowsFor(populationResult, userNames) {
+    return filterActorRows(populationResult.actorRows, config.EXCLUDED_ACTOR_IDS).map(row => ({
+        userId: row.userId,
+        name: userNames.get(row.userId) || `User ${row.userId}`,
+        actioned: row.actioned,
+        handedOff: row.handedOff,
+        events: row.events
+    }));
 }
 
 (async () => {
@@ -233,6 +254,8 @@ function trendRows(populationResult) {
             .filter(id => !knownIds.has(id)))];
         const recoveredRaw = missingIds.length ? await fetchItemsById(missingIds) : [];
         const items = [...currentRaw, ...recoveredRaw].map(baseItem);
+        const actorIds = [...new Set(allEvents.map(e => e.actorUserId).filter(id => id && id !== 'unknown'))];
+        const userNames = await fetchUserNames(actorIds);
         console.log(`Loaded ${items.length} items (${recoveredRaw.length} recovered) and ${allEvents.length} qualifying events.\n`);
 
         // Walk backwards from now, rewinding state one week at a time.
@@ -318,8 +341,14 @@ function trendRows(populationResult) {
                 generatedAt: target.refDate.toISOString(),
                 windowFrom: target.fromDate.toISOString(),
                 populations: {
-                    snap: { rows: trendRows(result.populations.snap) },
-                    fieldService: { rows: trendRows(result.populations.fieldService) }
+                    snap: {
+                        rows: trendRows(result.populations.snap),
+                        actorRows: actorRowsFor(result.populations.snap, userNames)
+                    },
+                    fieldService: {
+                        rows: trendRows(result.populations.fieldService),
+                        actorRows: actorRowsFor(result.populations.fieldService, userNames)
+                    }
                 }
             };
         }

@@ -144,3 +144,37 @@ Render supports manual cron runs from the `weekly-movement-report` service's **R
 Where Richard names a primary owner plus collaborators — Pick/Materials and Shipped to Darien are "Mark Rodriguez with Jessica Sanchez and Stacie Knutsen" — the primary owner carries the accountability, matching how his own scorecard scores those rows. The collaborators are recorded as comments in the config. Stacie Knutsen owns no status outright and therefore never appears as an owner.
 
 Two statuses are now ownerless rather than one, so "informational" is resolved through the owner map (any status mapped to `null`) instead of matching the single string "Ordered from Supplier". Where they are reported together the label is "Ordered from Supplier / Awaiting Full Order", matching Richard's combined row.
+
+### Person credit vs department credit (2026-08-19, confirmed by Ambrea)
+
+Ambrea caught the report starring Vanessa Bonilla-Aguirre as Field Service "top mover"
+with 103 actioned when she had not viewed the board in seven days. Of the 333 events
+credited to her, she personally performed **one**; Jack performed 282. Cause: a status
+change credited the owner of the status being *left*, and Vanessa owns
+`New Item - Requires Assignment`, the intake queue every new order passes through.
+
+The report now separates the two questions explicitly:
+
+| Section | Keyed by | Answers |
+|---|---|---|
+| **Who moved work this week** (scorecard) | the Monday user who made the change | who did the work |
+| **Department queue health** (owner detail) | the department that owns the stage | whose queue is loaded, waiting, ageing |
+
+Scorecard definitions: **Actioned** = distinct orders that person made at least one
+qualifying change to (ten edits to one order still counts once). **Handed off** =
+distinct orders that person moved to a different owner, stage, or out of the group.
+The ★ top-mover highlight follows Actioned.
+
+Owner-based `rows` remain in the data model and still drive current load, waiting,
+median wait, dwell, oldest order and 7-day activity — a stalled order is the owning
+department's to resolve regardless of who last touched it.
+
+**Automation is excluded** from all person-level reporting via `EXCLUDED_ACTOR_IDS`
+(Monday's automation user `-4` produced 483 events in one week, more than any human),
+as is the `unknown` actor.
+
+The weekly trend also charts people, not queues, and stores resolved display names in
+each snapshot (`populations.*.actorRows`). Weeks stored before this change carry only
+owner rows and are **skipped** by the trend rather than mixed with actor rows — re-run
+`backfill-dynamic-history.js --force --include-anchor --apply` after deploying this
+change, or the trend will show only the live column.

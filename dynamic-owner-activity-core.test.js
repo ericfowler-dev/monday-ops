@@ -5,6 +5,7 @@ const {
     computeDynamicOwnerActivity,
     buildActionedTrend,
     NO_OWNER_LABEL,
+    filterActorRows,
     buildWeeklySnapshot,
     medianOf
 } = require('./dynamic-owner-activity-core');
@@ -406,33 +407,86 @@ test('closure stats measure Date Shipped minus Order Date for orders closed this
     assert.equal(closure.medianClosureDays, 3.5);
 });
 
-test('actioned trend merges populations per person and tolerates v1 snapshots', () => {
+test('actioned trend charts people and skips weeks stored before actor credit', () => {
     const currentResult = compute([item()], [
-        event('status', '2026-08-04T08:00:00.000Z', { previousStatus: 'Dept A', nextStatus: 'Dept B', columnTitle: 'Current Dept / Status' })
+        event('status', '2026-08-04T08:00:00.000Z', {
+            previousStatus: 'Dept A', nextStatus: 'Dept B',
+            columnTitle: 'Current Dept / Status', actorUserId: 'jack'
+        })
     ]);
+    const actorWeek = (pop, rows) => ({ version: 2, populations: { snap: { actorRows: pop === 'snap' ? rows : [] }, fieldService: { actorRows: pop === 'field' ? rows : [] } } });
     const historyWeeks = {
-        '2026-07-27': { version: 1, populations: { snap: { rows: { 'Owner A': { actioned: 2 } } }, fieldService: { rows: { 'Owner A': { actioned: 1 }, 'Unmapped — check config': { actioned: 9 } } } } },
-        '2026-08-10': { version: 2, populations: { snap: { rows: {} }, fieldService: { rows: { 'Owner B': { actioned: 4 } } } } },
-        '2026-08-03': null
+        '2026-07-27': {
+            version: 2,
+            populations: {
+                snap: { actorRows: [{ userId: 'jack', name: 'Jack Richards', actioned: 2 }] },
+                fieldService: { actorRows: [{ userId: 'jack', name: 'Jack Richards', actioned: 1 }] }
+            }
+        },
+        // Stored before the switch: owner rows only, so it must not be charted.
+        '2026-08-03': { version: 2, populations: { snap: { rows: { 'Owner A': { actioned: 50 } } }, fieldService: { rows: {} } } },
+        '2026-08-10': actorWeek('field', [{ userId: 'clare', name: 'Clare Heckert', actioned: 4 }]),
+        '2026-08-05': null
     };
-    const trend = buildActionedTrend({ historyWeeks, currentWeekKey: '2026-08-17', currentResult, maxWeeks: 8 });
+    const trend = buildActionedTrend({ historyWeeks, currentWeekKey: '2026-08-17', currentResult, maxWeeks: 8, userNames: new Map([['jack', 'Jack Richards']]) });
     assert.deepEqual(trend.weekKeys, ['2026-07-27', '2026-08-10', '2026-08-17']);
     assert.equal(trend.weeksAvailable, 3);
-    const ownerA = trend.owners.find(row => row.owner === 'Owner A');
-    assert.deepEqual(ownerA.counts, [3, 0, 1]);
-    const ownerB = trend.owners.find(row => row.owner === 'Owner B');
-    assert.deepEqual(ownerB.counts, [0, 4, 0]);
+    const jack = trend.owners.find(row => row.owner === 'Jack Richards');
+    assert.deepEqual(jack.counts, [3, 0, 1]);
+    const clare = trend.owners.find(row => row.owner === 'Clare Heckert');
+    assert.deepEqual(clare.counts, [0, 4, 0]);
     assert.equal(trend.maxCount, 4);
-    assert.ok(!trend.owners.some(row => row.owner.includes('Unmapped')));
     const trimmed = buildActionedTrend({ historyWeeks, currentWeekKey: '2026-08-17', currentResult, maxWeeks: 2 });
     assert.deepEqual(trimmed.weekKeys, ['2026-08-10', '2026-08-17']);
 });
 
+test('scorecard credits the person who made the change, not the queue owner', () => {
+    // Jack triages an order out of Vanessa's intake queue: the work is Jack's,
+    // the queue was Vanessa's. This is the case Ambrea caught on 8/19.
+    const events = [
+        event('status', '2026-08-04T08:00:00.000Z', {
+            previousStatus: 'Dept A', nextStatus: 'Dept B',
+            columnTitle: 'Current Dept / Status', actorUserId: 'jack'
+        })
+    ];
+    const result = compute([item()], events);
+    const population = result.populations.fieldService;
+    // Owner attribution still records the queue that was left.
+    assert.equal(population.rows['Owner A'].actioned, 1);
+    // Actor attribution credits Jack, who actually performed it.
+    const jack = population.actorRows.find(row => row.userId === 'jack');
+    assert.equal(jack.actioned, 1);
+    assert.equal(jack.handedOff, 1);
+    assert.ok(!population.actorRows.some(row => row.userId === 'owner-a'));
+});
+
+test('actor rows count distinct orders, not raw edits', () => {
+    const events = [
+        event('operational', '2026-08-04T08:00:00.000Z', { columnTitle: 'Tracking/DDL #', actorUserId: 'jack' }),
+        event('operational', '2026-08-04T09:00:00.000Z', { columnTitle: 'Purchase Order', actorUserId: 'jack' }),
+        event('operational', '2026-08-04T10:00:00.000Z', { columnTitle: 'Quantity', actorUserId: 'jack' })
+    ];
+    const jack = compute([item()], events).populations.fieldService.actorRows.find(r => r.userId === 'jack');
+    assert.equal(jack.events, 3);
+    assert.equal(jack.actioned, 1);
+    assert.equal(jack.handedOff, 0);
+});
+
+test('automation and unknown actors are filtered out of person reporting', () => {
+    const rows = [
+        { userId: 'jack', actioned: 5 },
+        { userId: '-4', actioned: 99 },
+        { userId: 'unknown', actioned: 12 }
+    ];
+    assert.deepEqual(filterActorRows(rows, ['-4']).map(r => r.userId), ['jack']);
+    assert.deepEqual(filterActorRows(rows, []).map(r => r.userId), ['jack', '-4']);
+});
+
 test('actioned trend ignores snapshots written off the scheduled weekday', () => {
     const currentResult = compute([item()], [
-        event('status', '2026-08-04T08:00:00.000Z', { previousStatus: 'Dept A', nextStatus: 'Dept B', columnTitle: 'Current Dept / Status' })
+        event('status', '2026-08-04T08:00:00.000Z', { previousStatus: 'Dept A', nextStatus: 'Dept B', columnTitle: 'Current Dept / Status', actorUserId: 'jack' })
     ]);
-    const week = actioned => ({ version: 2, populations: { snap: { rows: {} }, fieldService: { rows: { 'Owner B': { actioned } } } } });
+    const week = actioned => ({ version: 2, populations: { snap: { actorRows: [] }, fieldService: { actorRows: [{ userId: 'jack', name: 'Jack Richards', actioned }] } } });
     // The keys actually stored on 2026-08-18: one Monday plus five nightly runs.
     const historyWeeks = {
         '2026-08-10': week(50), // Mon
@@ -445,13 +499,13 @@ test('actioned trend ignores snapshots written off the scheduled weekday', () =>
     const monday = 1;
     const trend = buildActionedTrend({ historyWeeks, currentWeekKey: '2026-08-24', currentResult, maxWeeks: 8, snapshotWeekday: monday });
     assert.deepEqual(trend.weekKeys, ['2026-08-10', '2026-08-17', '2026-08-24']);
-    const ownerB = trend.owners.find(row => row.owner === 'Owner B');
-    // Owner B receives but never actions in the live window, so today's cell is 0.
-    assert.deepEqual(ownerB.counts, [50, 70, 0]);
-    assert.equal(ownerB.total, 120);
+    const jack = trend.owners.find(row => row.owner === 'Jack Richards');
+    // The live window credits Jack once for the status change he performed.
+    assert.deepEqual(jack.counts, [50, 70, 1]);
+    assert.equal(jack.total, 121);
     // Without the gate every overlapping nightly window is summed instead.
     const ungated = buildActionedTrend({ historyWeeks, currentWeekKey: '2026-08-24', currentResult, maxWeeks: 8 });
-    assert.equal(ungated.owners.find(row => row.owner === 'Owner B').total, 366);
+    assert.equal(ungated.owners.find(row => row.owner === 'Jack Richards').total, 367);
 });
 
 test('normalizer deduplicates activity, removes same-value edits, and keeps group moves', () => {
