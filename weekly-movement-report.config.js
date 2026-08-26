@@ -6,6 +6,9 @@ module.exports = {
     BOARD_NAME: base.BOARD_NAME,
     VIEW_ID: base.VIEW_ID,
     FIELD_SERVICE_VIEW_ID: base.FIELD_SERVICE_VIEW_ID,
+    // Ambrea's management overview. The movement email links here from the
+    // bottleneck chart so readers can drill into the live status view.
+    OVERVIEW_VIEW_ID: '259431125',
     SNAP_GROUP_ID: base.SNAP_GROUP_ID,
     FIELD_SERVICE_GROUP_ID: base.FIELD_SERVICE_GROUP_ID,
     COL_IDS: base.COL_IDS,

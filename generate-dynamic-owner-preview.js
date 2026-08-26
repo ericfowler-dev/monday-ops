@@ -288,7 +288,7 @@ function mapItem(raw, now) {
 function renderHtml(data) {
     const { result, now, fromDate } = data;
     return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-    <style>body,table,td,th,div,h1,h2,a,span{font-family:${FONT}!important} @media(max-width:760px){.metric{display:block!important;width:auto!important}.shell{width:100%!important}}</style></head>
+    <style>body,table,td,th,div,h1,h2,a,span{font-family:${FONT}!important} @media(max-width:760px){.metric,.bottleneck-card{display:block!important;width:auto!important}.shell{width:100%!important}}</style></head>
     <body style="margin:0;background:#eef2f7;color:#172033"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:24px 10px">
     <table class="shell" role="presentation" width="1120" cellpadding="0" cellspacing="0" style="width:1120px;max-width:100%;background:#fff;box-shadow:0 10px 30px rgba(15,23,42,.08)">
       <tr><td style="padding:30px 34px;background:#12213f;color:#fff;border-bottom:6px solid #14b8a6">
@@ -310,7 +310,10 @@ function renderHtml(data) {
           userNames: data.userNames,
           excludedActorIds: config.EXCLUDED_ACTOR_IDS
       }))}
-      ${renderBottleneck(result.populations)}
+      ${renderBottleneck(
+          result.populations,
+          `https://${config.MONDAY_SLUG}.monday.com/boards/${config.BOARD_ID}/views/${config.OVERVIEW_VIEW_ID}`
+      )}
       ${renderAgingBuckets(result.populations)}
       ${renderOwnerDetail('Factory SNAP', result.populations.snap)}
       ${renderOwnerDetail('Field Service', result.populations.fieldService)}
@@ -350,18 +353,51 @@ function renderExecutiveSummary(executive) {
     </tr></table></td></tr>`;
 }
 
-function renderBottleneck(populations) {
+function renderBottleneck(populations, overviewUrl) {
     const combined = [
         ...populations.snap.statusBottlenecks.map(row => ({ ...row, populationLabel: 'Factory SNAP' })),
         ...populations.fieldService.statusBottlenecks.map(row => ({ ...row, populationLabel: 'Field Service' }))
     ].sort((a, b) => b.waiting - a.waiting || b.currentCount - a.currentCount || a.status.localeCompare(b.status))
         .slice(0, 6);
-    const rows = combined.map(row => {
-        const median = row.medianSinceActivityHours === null ? '—' : `${row.medianLowerBound ? '≥' : ''}${formatDuration(row.medianSinceActivityHours)}`;
-        return `<tr><td style="${td()}font-weight:700">${escapeHtml(row.status)}</td><td style="${td()}">${escapeHtml(row.populationLabel)}</td><td align="right" style="${td()}">${row.currentCount}</td><td align="right" style="${td()}font-weight:800;color:${row.waiting ? '#b91c1c' : '#94a3b8'}">${dash(row.waiting)}</td><td align="right" style="${td()}">${pctLabel(row.waitingPct)}</td><td align="right" style="${td()}">${median}</td><td align="right" style="${td()}">${row.oldestAgeDays === null ? '—' : `${row.oldestAgeDays}d`}</td><td align="center" style="${td()}">${row.supplierWaiting ? 'Yes' : '—'}</td></tr>`;
-    }).join('');
-    return `${sectionTitle('Where work is stuck', 'Top workflow statuses by waiting count (top 6 shown). Unowned stages (Ordered from Supplier, Awaiting Full Order) carry no owner, so waiting stats do not apply.')}
-    <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed"><tr style="background:#12213f"><th align="left" style="${th()}">Status</th><th align="left" style="${th()}">Population</th><th align="right" style="${th()}">Current</th><th align="right" style="${th()}">Waiting &gt;24h</th><th align="right" style="${th()}">Waiting %</th><th align="right" style="${th()}">Median since activity</th><th align="right" style="${th()}">Oldest (age)</th><th align="center" style="${th()}">Supplier</th></tr>${rows || emptyRow(8, 'No current open work.')}</table></td></tr>`;
+    const maxCurrent = Math.max(1, ...combined.map(row => row.currentCount));
+    const chartCards = combined.map(row => {
+        const populationColor = row.populationLabel === 'Factory SNAP' ? '#2563eb' : '#0f766e';
+        const countLabel = row.supplierWaiting
+            ? `${row.currentCount} current · unowned stage`
+            : `${row.waiting} waiting of ${row.currentCount} · ${pctLabel(row.waitingPct)}`;
+        const oldestLabel = row.oldestAgeDays === null ? 'Oldest order age unavailable' : `Oldest order ${row.oldestAgeDays}d`;
+        return `<td class="bottleneck-card" width="50%" valign="top" style="padding:5px">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #cbd5e1;border-left:5px solid ${populationColor};background:#ffffff"><tr><td style="padding:14px 15px">
+            <a href="${overviewUrl}" style="color:#0f172a;text-decoration:none;font-size:15px;font-weight:800;line-height:20px">${escapeHtml(row.status)}</a>
+            <div style="margin-top:5px;font-size:11px;line-height:15px;color:${populationColor};font-weight:800;letter-spacing:.4px;text-transform:uppercase">${escapeHtml(row.populationLabel)}</div>
+            <div style="margin-top:4px;font-size:14px;font-weight:800;line-height:19px;color:${row.waiting ? '#991b1b' : '#334155'}">${escapeHtml(countLabel)}</div>
+            <div style="margin-top:3px;font-size:11px;line-height:16px;color:#475569;font-weight:600">${escapeHtml(oldestLabel)}</div>
+            <div style="margin-top:10px">${bottleneckBar(row, maxCurrent)}</div>
+          </td></tr></table>
+        </td>`;
+    });
+    const chartRows = [];
+    for (let index = 0; index < chartCards.length; index += 2) {
+        chartRows.push(`<tr>${chartCards[index]}${chartCards[index + 1] || '<td class="bottleneck-card" width="50%"></td>'}</tr>`);
+    }
+    return `<tr><td style="padding:17px 28px 7px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td valign="middle"><div style="font-size:19px;font-weight:800;color:#0f172a">Where work is stuck</div><div style="font-size:12px;line-height:17px;color:#475569;margin-top:4px">Top six statuses by waiting count. Red shows work waiting more than 24 hours; pale bars show the balance of current work. Unowned stages appear in gray.</div></td>
+      <td width="200" align="right" valign="middle"><a href="${overviewUrl}" style="display:inline-block;padding:10px 13px;background:#4f46e5;color:#ffffff;text-decoration:none;font-size:12px;font-weight:800;border-radius:4px">Open live Monday overview</a></td>
+    </tr></table></td></tr>
+    <tr><td style="padding:0 23px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0">${chartRows.join('') || emptyRow(2, 'No current open work.')}</table></td></tr>`;
+}
+
+function bottleneckBar(row, maxCurrent, maxPx = 300) {
+    if (!row.currentCount) return '';
+    const totalPx = Math.max(4, Math.round(row.currentCount / maxCurrent * maxPx));
+    if (row.supplierWaiting) {
+        return `<table role="presentation" width="${totalPx}" cellpadding="0" cellspacing="0"><tr><td width="${totalPx}" height="15" bgcolor="#94a3b8" style="font-size:0;line-height:0">&nbsp;</td></tr></table>`;
+    }
+    const waitingPx = Math.round(row.waiting / row.currentCount * totalPx);
+    const activePx = totalPx - waitingPx;
+    const waitingSegment = waitingPx ? `<td width="${waitingPx}" height="15" bgcolor="#dc2626" style="font-size:0;line-height:0">&nbsp;</td>` : '';
+    const activeSegment = activePx ? `<td width="${activePx}" height="15" bgcolor="#93c5fd" style="font-size:0;line-height:0">&nbsp;</td>` : '';
+    return `<table role="presentation" width="${totalPx}" cellpadding="0" cellspacing="0"><tr>${waitingSegment}${activeSegment}</tr></table>`;
 }
 
 function renderAgingBuckets(populations) {
@@ -568,4 +604,8 @@ function formatDateTime(date) { return new Intl.DateTimeFormat('en-US', { timeZo
 function splitRecipients(value) { return String(value || '').split(/[;,]/).map(entry => entry.trim()).filter(Boolean); }
 function escapeHtml(value) { return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
-generateReport().catch(error => { console.error(`Fatal error: ${error.message}`); process.exitCode = 1; });
+if (require.main === module) {
+    generateReport().catch(error => { console.error(`Fatal error: ${error.message}`); process.exitCode = 1; });
+}
+
+module.exports = { renderBottleneck };
