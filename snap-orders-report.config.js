@@ -23,6 +23,10 @@ module.exports = {
     CLOSED_LOOKBACK_DAYS: [7, 14, 30],
     RECENT_SHIPPED_DAYS: 7,
 
+    // Cancelled lines are outside the report entirely: they do not count as open,
+    // shipped, or part of any historical metric.
+    EXCLUDED_CURRENT_STATUSES: ['Cancelled'],
+
     // Monday marks only "Shipped" as done in Current Dept / Status. "Shipped to
     // Darien" is an active internal workflow stage and must remain in this report.
     CLOSED_CURRENT_STATUSES: ['Shipped'],

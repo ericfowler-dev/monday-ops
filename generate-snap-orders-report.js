@@ -4,6 +4,11 @@ const fs = require('fs');
 const path = require('path');
 const { createClient } = require('redis');
 const config = require('./snap-orders-report.config');
+const {
+    excludeItemsByCurrentStatus,
+    sanitizeHistory,
+    statusIsOneOf
+} = require('./snap-orders-report-core');
 
 const HISTORY_FILE = path.join(__dirname, 'history-snap-orders.json');
 const LAST_RUN_FILE = path.join(__dirname, 'last-run-snap-orders.txt');
@@ -38,6 +43,7 @@ async function generateReport() {
             fetchBoard(),
             runtimeStore.readHistory()
         ]);
+        sanitizeHistory(history, config.EXCLUDED_CURRENT_STATUSES);
         const maximumClosedLookback = Math.max(...config.CLOSED_LOOKBACK_DAYS);
         const [populations, activityClosedItems] = await Promise.all([
             fetchOpenOrderItems(board),
@@ -167,7 +173,10 @@ async function fetchOpenOrderItems(board) {
             }
             const item = mapOrderItem(rawItem, board.id);
             const currentStatus = item.currentStatus;
-            if (config.CLOSED_CURRENT_STATUSES.some(status => status.toLowerCase() === currentStatus.toLowerCase())) {
+            if (statusIsOneOf(currentStatus, config.EXCLUDED_CURRENT_STATUSES)) {
+                continue;
+            }
+            if (statusIsOneOf(currentStatus, config.CLOSED_CURRENT_STATUSES)) {
                 populations.currentShipped.push(item);
                 continue;
             }
@@ -235,10 +244,12 @@ async function fetchRecentShippedItems(board, currentDateKey, lookbackDays) {
         items.push(...(data.items || []));
     }
 
-    return items.map(rawItem => ({
+    const mappedItems = items.map(rawItem => ({
         ...mapOrderItem(rawItem, board.id),
         completedAt: shippedEvents.get(String(rawItem.id))
-    }))
+    }));
+
+    return excludeItemsByCurrentStatus(mappedItems, config.EXCLUDED_CURRENT_STATUSES)
         .filter(item => relevantGroups.has(item.groupId) && item.completedAt)
         .sort((a, b) => b.completedAt - a.completedAt || a.name.localeCompare(b.name));
 }
@@ -276,7 +287,7 @@ function mergeClosedItems(currentShipped, activityClosedItems) {
             completedAt: item.dateShipped || activityItem?.completedAt || null
         });
     }
-    return [...itemsById.values()]
+    return excludeItemsByCurrentStatus([...itemsById.values()], config.EXCLUDED_CURRENT_STATUSES)
         .filter(item => item.completedAt)
         .sort((a, b) => b.completedAt - a.completedAt || a.name.localeCompare(b.name));
 }

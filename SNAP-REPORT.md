@@ -22,7 +22,9 @@ The three detailed operational sections use the **Order Type** column together
 with the Factory and Field Service groups. Service, Sales Order, ambiguous
 multi-select values, Drafts, and Missing Part Factory Requests remain visible as
 the remainder in the active total rather than being folded into a requested
-bucket. An item is open when its **Current Dept / Status** is not `Shipped`.
+bucket. An item is open when its **Current Dept / Status** is neither `Shipped`
+nor `Cancelled`. `Cancelled` lines are excluded from all current, shipped,
+comparison, and historical trend metrics.
 `Shipped to Darien` remains open because it is an active internal workflow
 stage on the board.
 

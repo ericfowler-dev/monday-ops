@@ -10,6 +10,7 @@
     "pdx:test-graph": "node test-pdx-graph-mail.js",
     "snap:report": "node generate-snap-orders-report.js",
     "snap:preview": "node generate-snap-orders-report.js --force --dry-run",
+    "snap:test": "node --test snap-orders-report-core.test.js",
     "movement:report": "node generate-dynamic-owner-preview.js --send",
     "movement:preview": "node generate-dynamic-owner-preview.js",
     "movement:legacy-preview": "node generate-weekly-movement-report.js --force --dry-run",
