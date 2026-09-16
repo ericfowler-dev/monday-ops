@@ -3,6 +3,7 @@
 // the reporting window, and the status-to-owner mapping.
 
 const movementCore = require('./weekly-movement-core');
+const { isCancelled } = require('./movement-daily-core');
 
 // Statuses mapped to null in OWNER_MAP carry no owner. Richard's analysis groups
 // them as one row; this is the label used wherever they are reported together.
@@ -119,6 +120,9 @@ function computeDynamicOwnerActivity({
     waitingHours,
     pastDueDays
 }) {
+    const excludedIds = new Set(items.filter(isCancelled).map(item => String(item.id)));
+    items = items.filter(item => !excludedIds.has(String(item.id)));
+    events = events.filter(event => !excludedIds.has(String(event.itemId)));
     const itemById = new Map(items.map(item => [String(item.id), item]));
     const windowEvents = events.filter(event => event.at >= fromDate && event.at <= refDate);
     const eventsByItem = new Map();
@@ -462,6 +466,8 @@ function buildActorRows(actorWork, population) {
         .map(([userId, row]) => ({
             userId,
             actioned: row.actioned.size,
+            actionedItemIds: [...row.actioned],
+            handedOffItemIds: [...row.handedOff],
             handedOff: row.handedOff.size,
             events: row.events
         }))
@@ -791,13 +797,14 @@ function weekdayOfDateKey(dateKey) {
 // week apart double-count the same activity. When snapshotWeekday is supplied,
 // only keys written on that weekday are charted — off-schedule keys (from test
 // runs or a mis-set cron) are ignored rather than inflating the totals.
-function buildActionedTrend({ historyWeeks, currentWeekKey, currentResult, maxWeeks = 8, snapshotWeekday = null, userNames = null, excludedActorIds = null }) {
+function buildActionedTrend({ historyWeeks, currentWeekKey, currentResult, maxWeeks = 8, snapshotWeekday = null, userNames = null, excludedActorIds = null, excludedItemIds = null, requireItemEvidence = false }) {
     const onSchedule = key => snapshotWeekday === null || weekdayOfDateKey(key) === snapshotWeekday;
     // Weeks stored before the switch to actor-based credit carry only owner rows.
     // Charting them beside actor rows would mix two different measures, so skip them.
     const hasActorRows = week => ['snap', 'fieldService'].some(pop => week.populations?.[pop]?.actorRows);
     const stored = Object.entries(historyWeeks || {})
-        .filter(([key, week]) => key < currentWeekKey && week && week.populations && onSchedule(key) && hasActorRows(week))
+        .filter(([key, week]) => key < currentWeekKey && week && week.populations && onSchedule(key) && hasActorRows(week)
+            && (!requireItemEvidence || week.version >= 3))
         .sort(([a], [b]) => a.localeCompare(b))
         .slice(-(Math.max(1, maxWeeks) - 1));
     const columns = [
@@ -809,7 +816,9 @@ function buildActionedTrend({ historyWeeks, currentWeekKey, currentResult, maxWe
     // Stored weeks carry resolved names; the live week is filtered and named here.
     const rowsFor = (populations, population) => {
         const rows = populations?.[population]?.actorRows || [];
-        return populations === currentResult.populations ? filterActorRows(rows, excludedActorIds) : rows;
+        return filterActorRows(rows, excludedActorIds).map(row => ({ ...row,
+            actioned: excludedItemIds && row.actionedItemIds
+                ? row.actionedItemIds.filter(id => !excludedItemIds.has(String(id))).length : row.actioned }));
     };
     const nameOf = row => row.name || (userNames && userNames.get(String(row.userId))) || String(row.userId);
     const actionedFor = (populations, userId) => ['snap', 'fieldService'].reduce((total, population) => {
@@ -870,12 +879,14 @@ function buildWeeklySnapshot({ result, items, refDate, isInformational, userName
             userId: row.userId,
             name: (userNames && userNames.get(row.userId)) || `User ${row.userId}`,
             actioned: row.actioned,
+            actionedItemIds: row.actionedItemIds,
+            handedOffItemIds: row.handedOffItemIds,
             handedOff: row.handedOff,
             events: row.events
         }))
     });
     return {
-        version: 2,
+        version: 3,
         generatedAt: refDate.toISOString(),
         executive: result.executive,
         critical: result.critical || null,
@@ -885,7 +896,7 @@ function buildWeeklySnapshot({ result, items, refDate, isInformational, userName
             snap: litePopulation(result.populations.snap),
             fieldService: litePopulation(result.populations.fieldService)
         },
-        items: items.filter(item => item.population && item.isOpen).map(item => {
+        items: items.filter(item => item.population && item.isOpen && !isCancelled(item)).map(item => {
             const pair = assignmentByItem.get(item.id) || null;
             return {
                 id: item.id,

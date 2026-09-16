@@ -272,7 +272,7 @@ test('weekly snapshot captures executive, population, and item state', () => {
     ];
     const result = compute(items, []);
     const snapshot = buildWeeklySnapshot({ result, items, refDate: TO });
-    assert.equal(snapshot.version, 2);
+    assert.equal(snapshot.version, 3);
     assert.equal(snapshot.generatedAt, TO.toISOString());
     assert.equal(snapshot.items.length, 3);
     assert.equal(snapshot.critical.openCritical, 0);

@@ -24,6 +24,7 @@ require('dotenv').config();
 const config = require('./weekly-movement-report.config');
 const { normalizeBoardActivityLogs, computeDynamicOwnerActivity, filterActorRows } = require('./dynamic-owner-activity-core');
 const { createHistoryStore } = require('./dynamic-owner-history-store');
+const { isCancelled } = require('./movement-daily-core');
 
 const MONDAY_API_VERSION = process.env.MONDAY_API_VERSION || '2026-07';
 const ACTIVITY_LIMIT = 10000;
@@ -196,6 +197,8 @@ function actorRowsFor(populationResult, userNames) {
         userId: row.userId,
         name: userNames.get(row.userId) || `User ${row.userId}`,
         actioned: row.actioned,
+        actionedItemIds: row.actionedItemIds,
+        handedOffItemIds: row.handedOffItemIds,
         handedOff: row.handedOff,
         events: row.events
     }));
@@ -253,7 +256,7 @@ function actorRowsFor(populationResult, userNames) {
             .map(event => event.itemId)
             .filter(id => !knownIds.has(id)))];
         const recoveredRaw = missingIds.length ? await fetchItemsById(missingIds) : [];
-        const items = [...currentRaw, ...recoveredRaw].map(baseItem);
+        const items = [...currentRaw, ...recoveredRaw].map(baseItem).filter(item => !isCancelled(item));
         const actorIds = [...new Set(allEvents.map(e => e.actorUserId).filter(id => id && id !== 'unknown'))];
         const userNames = await fetchUserNames(actorIds);
         console.log(`Loaded ${items.length} items (${recoveredRaw.length} recovered) and ${allEvents.length} qualifying events.\n`);
@@ -334,7 +337,7 @@ function actorRowsFor(populationResult, userNames) {
         }
         for (const { target, result } of writes) {
             history.weeks[target.key] = {
-                version: 2,
+                version: 3,
                 backfilled: true,
                 partial: true,
                 note: 'Rebuilt from monday activity logs. Activity metrics only; no board-state fields.',

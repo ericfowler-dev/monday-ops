@@ -1,5 +1,10 @@
 # Open Order Activity Report — Logic Summary
 
+> September 16, 2026: daily delivery, cancellation exclusion, shipment charts,
+> version-3 historical trends and recipient operations are now documented in
+> [MOVEMENT-REPORT.md](MOVEMENT-REPORT.md). It supersedes conflicting cancellation,
+> automation/throughput, schedule and layout descriptions in this historical note.
+
 This is the concise cross-reference for the dynamic-owner preview. The report answers two different questions:
 
 1. Which person or department was accountable when work occurred?

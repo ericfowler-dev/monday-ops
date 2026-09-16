@@ -1,5 +1,9 @@
 # Open SNAP Orders daily report
 
+> Retired in favor of the [consolidated daily movement report](MOVEMENT-REPORT.md).
+> Production delivery is disabled unless `SNAP_REPORT_ENABLED=1` is explicitly
+> configured for rollback. Keep its Render cron suspended after cutover.
+
 This report reads the **Order Tracker** board and tracks three independent
 operational populations:
 

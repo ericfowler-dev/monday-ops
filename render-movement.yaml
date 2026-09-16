@@ -1,11 +1,11 @@
 services:
   - type: cron
-    name: weekly-movement-report
+    name: daily-movement-report
     runtime: node
     plan: starter
     # Render cron uses UTC. Running at both possible UTC hours lets the script
-    # enforce Monday 5:00 AM America/Chicago across daylight-saving changes.
-    schedule: '0 10,11 * * 1'
+    # enforce weekday 5:00 AM America/Chicago across daylight-saving changes.
+    schedule: '0 10,11 * * 1-5'
     buildCommand: npm ci
     startCommand: node generate-dynamic-owner-preview.js --send
     envVars:
@@ -14,7 +14,7 @@ services:
       - key: MONDAY_API_TOKEN
         sync: false
       - key: MOVEMENT_REPORT_TO_EMAIL
-        value: efowler@psiengines.com
+        sync: false
       - key: M365_TENANT_ID
         sync: false
       - key: M365_CLIENT_ID

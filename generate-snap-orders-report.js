@@ -21,6 +21,10 @@ async function generateReport() {
     const args = new Set(process.argv.slice(2));
     const force = args.has('--force') || args.has('-f') || process.env.FORCE_RUN === '1';
     const dryRun = args.has('--dry-run') || process.env.DRY_RUN === '1';
+    if (!dryRun && process.env.SNAP_REPORT_ENABLED !== '1') {
+        console.log('SNAP daily email retired; the consolidated movement report is the daily delivery. Set SNAP_REPORT_ENABLED=1 only for an intentional rollback.');
+        return;
+    }
     const now = new Date();
     const central = getZonedDateParts(now, config.TIME_ZONE);
     let runtimeStore;

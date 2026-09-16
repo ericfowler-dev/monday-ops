@@ -15,7 +15,7 @@ async function createHistoryStore() {
     if (!process.env.REDIS_URL) {
         return createFileHistoryStore();
     }
-    const client = createClient({ url: process.env.REDIS_URL });
+    const client = createClient({ url: process.env.REDIS_URL, socket: { connectTimeout: 10000, reconnectStrategy: false } });
     client.on('error', error => console.error(`Redis error: ${error.message}`));
     await client.connect();
     return {
@@ -26,11 +26,19 @@ async function createHistoryStore() {
         },
         async writeHistory(history) { await client.set(REDIS_HISTORY_KEY, JSON.stringify(history)); },
         async writeLastRun(dateKey) { await client.set(REDIS_LAST_RUN_KEY, dateKey); },
+        async claimDelivery(dateKey) {
+            if (await client.exists(`dynamic:sent:${dateKey}`)) return false;
+            return Boolean(await client.set(`dynamic:sending:${dateKey}`, '1', { NX: true, EX: 900 }));
+        },
+        async markDelivered(dateKey) { await client.set(`dynamic:sent:${dateKey}`, '1', { EX: 86400 * 45 }); },
+        async releaseDelivery(dateKey) { await client.del(`dynamic:sending:${dateKey}`); },
         async close() { if (client.isOpen) await client.quit(); }
     };
 }
 
 function createFileHistoryStore() {
+    const sentFile = path.join(__dirname, 'exports', 'movement-deliveries.json');
+    const readSent = () => fs.existsSync(sentFile) ? JSON.parse(fs.readFileSync(sentFile, 'utf8')) : {};
     return {
         kind: 'file',
         async readHistory() {
@@ -40,6 +48,12 @@ function createFileHistoryStore() {
         },
         async writeHistory(history) { fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2)); },
         async writeLastRun() {},
+        async claimDelivery(dateKey) { return !readSent()[dateKey]; },
+        async markDelivered(dateKey) {
+            fs.mkdirSync(path.dirname(sentFile), { recursive: true });
+            fs.writeFileSync(sentFile, JSON.stringify({ ...readSent(), [dateKey]: true }));
+        },
+        async releaseDelivery() {},
         async close() {}
     };
 }

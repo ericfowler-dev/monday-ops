@@ -13,10 +13,9 @@ module.exports = {
     FIELD_SERVICE_GROUP_ID: base.FIELD_SERVICE_GROUP_ID,
     COL_IDS: base.COL_IDS,
     TIME_ZONE: base.TIME_ZONE,
-    // Base treats only "Shipped" as done. This report also treats "Cancelled" as
-    // terminal (Eric 8/18) so cancelled lines leave open-order and owner metrics;
-    // the daily SNAP report keeps base behavior.
-    CLOSED_CURRENT_STATUSES: [...base.CLOSED_CURRENT_STATUSES, 'Cancelled'],
+    // Cancelled items are removed before any metrics or history are computed.
+    EXCLUDED_CURRENT_STATUSES: ['Cancelled'],
+    CLOSED_CURRENT_STATUSES: ['Shipped'],
 
     SCHEDULE_WEEKDAY: 1, // Monday (0 = Sunday)
     SCHEDULE_HOUR: 5,

@@ -1,3 +1,5 @@
+# Retired: keep suspended in Render. Retained for deliberate rollback only.
+# Shared SNAP configuration is still used by the consolidated movement report.
 services:
   - type: cron
     name: snap-orders-daily-report
@@ -9,6 +11,8 @@ services:
     buildCommand: npm ci
     startCommand: node generate-snap-orders-report.js
     envVars:
+      - key: SNAP_REPORT_ENABLED
+        value: '0'
       - key: NODE_ENV
         value: production
       - key: MONDAY_API_TOKEN
