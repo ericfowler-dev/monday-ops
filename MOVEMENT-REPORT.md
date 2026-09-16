@@ -54,6 +54,8 @@ The script fails rather than quietly publishing a truncated interval.
 Copy the current saved SNAP distribution at cutover, not the old delivery logs.
 Addresses are trimmed, normalized and deduplicated; invalid/empty production
 lists fail instead of falling back to a default recipient.
+Both report manifests use `sync: false` for recipients, so future Blueprint
+updates preserve the saved distribution instead of restoring a hardcoded list.
 
 **After changing recipients in Render, deploy the service.** A saved environment
 value does not replace the deployed value until a deployment occurs. Selecting

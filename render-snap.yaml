@@ -18,7 +18,7 @@ services:
       - key: MONDAY_API_TOKEN
         sync: false
       - key: SNAP_REPORT_TO_EMAIL
-        value: efowler@psiengines.com
+        sync: false
       - key: M365_TENANT_ID
         sync: false
       - key: M365_CLIENT_ID
