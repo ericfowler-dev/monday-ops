@@ -108,4 +108,11 @@ function isDeliveryWindow(now) {
     const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: TIME_ZONE, hour: '2-digit', hourCycle: 'h23' }).format(now));
     return !['Sat', 'Sun'].includes(day) && hour === 5;
 }
-module.exports = { isCancelled, statusIs, dateKey, shiftDate, shipmentEvents, buildShipmentSummary, summarizeOpenOrders, isDeliveryWindow };
+function isDstCompanionRun(now) {
+    // Render runs at both possible UTC offsets for 5 AM Central. Suppress only
+    // the unused companion hour; a dashboard Trigger Run at another time is
+    // an intentional manual delivery, still subject to the daily send marker.
+    const weekday = now.getUTCDay();
+    return weekday >= 1 && weekday <= 5 && [10, 11].includes(now.getUTCHours()) && !isDeliveryWindow(now);
+}
+module.exports = { isCancelled, statusIs, dateKey, shiftDate, shipmentEvents, buildShipmentSummary, summarizeOpenOrders, isDeliveryWindow, isDstCompanionRun };

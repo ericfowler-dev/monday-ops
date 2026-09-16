@@ -68,10 +68,12 @@ Verify the actual deployed configuration without sending email:
 node generate-dynamic-owner-preview.js --check-delivery-config
 ```
 
-Render invokes both UTC hours (`0 10,11 * * 1-5`). The script accepts only the
-hour corresponding to 5 AM Central. Off-schedule post-deploy/manual runs skip
-email unless explicitly given `--force`. Redis delivery markers and a short
-send lock protect against duplicate same-day delivery. Weekly history still
+Render invokes both UTC hours (`0 10,11 * * 1-5`). The script skips the unused
+daylight-saving companion hour. Dashboard **Trigger Run** at other times sends
+the report immediately if it has not already been delivered that day. A manual
+run in the unused companion hour requires `--force` via a one-off job.
+Redis delivery markers and a short send lock protect against duplicate same-day
+delivery, including repeated manual runs. Weekly history still
 writes only on Mondays; it is separate from daily delivery markers.
 
 ## Verification and history rebuild

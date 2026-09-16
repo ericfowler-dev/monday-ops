@@ -6,7 +6,7 @@ const config = require('./weekly-movement-report.config');
 const { normalizeBoardActivityLogs, computeDynamicOwnerActivity, buildWeeklySnapshot, buildActionedTrend, filterActorRows } = require('./dynamic-owner-activity-core');
 const { pruneWeeks, ownerFor } = require('./weekly-movement-core');
 const { createHistoryStore } = require('./dynamic-owner-history-store');
-const { isCancelled, shipmentEvents, buildShipmentSummary, summarizeOpenOrders, isDeliveryWindow, shiftDate } = require('./movement-daily-core');
+const { isCancelled, shipmentEvents, buildShipmentSummary, summarizeOpenOrders, isDstCompanionRun, shiftDate } = require('./movement-daily-core');
 
 const MONDAY_API_VERSION = process.env.MONDAY_API_VERSION || '2026-07';
 const WINDOW_DAYS = 7;
@@ -53,8 +53,8 @@ async function generateReport() {
     const deliveryMode = args.has('--send') || process.env.SEND_EMAIL === '1';
     const dryRun = args.has('--dry-run') || process.env.DRY_RUN === '1';
     const now = new Date();
-    if (deliveryMode && !dryRun && process.env.RENDER === 'true' && !args.has('--force') && !isDeliveryWindow(now)) {
-        console.log('Delivery skipped: reports send only at 5 AM Central on weekdays. Use --force for an intentional manual delivery.');
+    if (deliveryMode && !dryRun && process.env.RENDER === 'true' && !args.has('--force') && isDstCompanionRun(now)) {
+        console.log('No email sent: skipping the unused daylight-saving companion hour. The scheduled delivery is 5 AM Central.');
         return;
     }
     const fromDate = new Date(now.getTime() - WINDOW_DAYS * 86400000);

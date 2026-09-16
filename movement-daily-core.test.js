@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { shipmentEvents, buildShipmentSummary, summarizeOpenOrders, isDeliveryWindow } = require('./movement-daily-core');
+const { shipmentEvents, buildShipmentSummary, summarizeOpenOrders, isDeliveryWindow, isDstCompanionRun } = require('./movement-daily-core');
 const { computeDynamicOwnerActivity, buildActionedTrend } = require('./dynamic-owner-activity-core');
 const { renderShipmentChart } = require('./generate-dynamic-owner-preview');
 const now = new Date('2026-09-16T10:00:00Z');
@@ -84,6 +84,14 @@ test('cancelled item contributes no open, closed, actor, queue, critical, closur
     assert.equal(result.actorRows.length, 0);
     assert.equal(result.currentAssignments.length, 0);
     assert.equal(result.dataQuality.unavailableEventItems, 0);
+});
+test('dashboard manual runs at 8:44 and 8:47 AM send; only the DST companion hour is suppressed', () => {
+    for (const value of ['2026-09-16T13:44:00Z', '2026-09-16T13:47:00Z', '2026-09-16T10:00:00Z', '2026-11-02T11:00:00Z', '2026-09-19T13:00:00Z']) {
+        assert.equal(isDstCompanionRun(new Date(value)), false, value);
+    }
+    for (const value of ['2026-09-16T11:00:00Z', '2026-11-02T10:00:00Z']) {
+        assert.equal(isDstCompanionRun(new Date(value)), true, value);
+    }
 });
 test('historical person trends remove later-cancelled items and omit unfilterable legacy totals', () => {
     const populations = { snap: { actorRows: [{ userId: 'p', name: 'Person', actioned: 2, actionedItemIds: ['kept', 'cancelled'] }] }, fieldService: { actorRows: [] } };
