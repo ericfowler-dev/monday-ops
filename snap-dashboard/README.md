@@ -1,9 +1,19 @@
 # Order Tracker Operations board view
 
 This folder contains a private monday.com board view for the Order Tracker board.
-It reads data as the signed-in monday user, calculates the same operational
-metrics as the SNAP email report, and renders an interactive dashboard inside
-the board.
+It reads data as the signed-in monday user and renders an interactive dashboard
+inside the board. Shipment calculations are shared with the daily Open Order
+Workflow Movement email report through the local `@monday-ops/reporting-core`
+package in `shared/` (also required by the root `movement-daily-core.js`).
+
+Shipment totals cover Factory SNAP plus all Field Service order types. The
+7/14/30-day windows end yesterday in America/Chicago; today is shown separately.
+Each line must currently be Shipped. Date Shipped takes precedence over the
+latest qualifying shipment event, which can recover a line moved to another
+group. Cancelled and reopened lines are excluded from throughput; cancelled
+lines are also excluded from open workload. Both surfaces display combined
+shipment totals as bar charts with date ranges. Live corrections in Monday can change historical
+totals after an email is sent.
 
 ## Included in the first version
 
@@ -14,7 +24,7 @@ the board.
 - Recent shipments with links back to individual orders
 - Manual refresh and automatic refresh after supported board events
 - Monday light/dark theme support
-- Activity-history fallback for removed completed items
+- Verified activity-history fallback for moved completed items
 
 ## Local development
 

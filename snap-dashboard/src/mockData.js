@@ -1,11 +1,12 @@
 import { CONFIG } from './config';
-import { summarize } from './reporting';
+import { summarize, buildDashboardShipments } from './reporting';
 
 const now = new Date();
 
 function item(id, overrides = {}) {
   return {
     id: String(id),
+    state: 'active',
     name: `Sample order ${id}`,
     url: '#',
     groupId: CONFIG.groups.factory,
@@ -59,8 +60,7 @@ export function getMockDashboardData() {
   })];
   const recentShipped = Array.from({ length: 7 }, (_, index) => item(index + 201, {
     currentStatus: 'Shipped',
-    dateShipped: new Date(now.getTime() - index * 86400000),
-    completedAt: new Date(now.getTime() - index * 86400000),
+    dateShipped: new Date(now.getTime() - (index + 1) * 86400000),
     trackingNumber: `1Z-SAMPLE-${index + 1}`
   }));
 
@@ -70,8 +70,7 @@ export function getMockDashboardData() {
     fieldMissingParts: summarize(fieldMissingParts, now, CONFIG.attentionItemLimit),
     fieldWarranty: summarize(fieldWarranty, now, CONFIG.attentionItemLimit),
     other: summarize(other, now, CONFIG.attentionItemLimit),
-    closedCounts: { 7: 7, 14: 11, 30: 19 },
-    recentShipped,
+    ...buildDashboardShipments(recentShipped, [], now, CONFIG.groups),
     refreshedAt: now,
     warnings: ['Mock preview data is enabled.']
   };

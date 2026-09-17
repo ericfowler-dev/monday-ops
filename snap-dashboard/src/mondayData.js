@@ -5,9 +5,10 @@ import {
   dateKeyForTimeZone,
   classifyOrderPopulation,
   daysBetween,
-  filterWithinLookback,
-  mergeClosedItems,
-  parseActivityTimestamp,
+  buildDashboardShipments,
+  isOpenOrder,
+  shipmentEvents,
+  shiftDate,
   parseDate,
   summarize
 } from './reporting';
@@ -38,33 +39,34 @@ export async function loadDashboard(boardId) {
 
   const now = new Date();
   const currentDateKey = dateKeyForTimeZone(now, CONFIG.timeZone);
-  const maximumLookback = Math.max(...CONFIG.closedLookbackDays);
   const warnings = [];
-  const [rawItems, activityClosedItems] = await Promise.all([
+  const [rawItems, events] = await Promise.all([
     fetchBoardItems(boardId),
-    fetchActivityClosedItems(boardId, currentDateKey, maximumLookback).catch(error => {
+    fetchShipmentEvents(boardId, new Date(`${shiftDate(currentDateKey, -31)}T00:00:00Z`), now).catch(error => {
       warnings.push(`Historical shipment fallback was unavailable: ${error.message}`);
       return [];
     })
   ]);
 
-  const populations = { factory: [], fieldMissingParts: [], fieldWarranty: [], other: [], currentShipped: [] };
+  const populations = { factory: [], fieldMissingParts: [], fieldWarranty: [], other: [] };
   for (const rawItem of rawItems) {
     if (!ACTIVE_GROUP_IDS.has(rawItem.group?.id) || rawItem.state !== 'active') continue;
     const mapped = mapOrderItem(rawItem, boardId, now);
-    if (mapped.currentStatus.toLowerCase() === 'shipped') {
-      populations.currentShipped.push(mapped);
-    } else {
+    if (isOpenOrder(mapped)) {
       const population = classifyOrderPopulation(mapped, CONFIG.groups);
       populations[population].push(mapped);
     }
   }
 
-  const closedItems = mergeClosedItems(populations.currentShipped, activityClosedItems);
-  const closedCounts = Object.fromEntries(CONFIG.closedLookbackDays.map(days => [
-    days,
-    filterWithinLookback(closedItems, currentDateKey, days).length
-  ]));
+  const knownIds = new Set(rawItems.map(item => String(item.id)));
+  const missingIds = [...new Set(events.map(event => event.itemId))].filter(id => !knownIds.has(id));
+  const historicalItems = await fetchItemsById(missingIds);
+  const retrievedIds = new Set(historicalItems.map(item => String(item.id)));
+  const unavailable = missingIds.filter(id => !retrievedIds.has(id)).length;
+  if (unavailable) warnings.push(`${unavailable} historical shipment records could not be verified and were excluded.`);
+  const shipmentReport = buildDashboardShipments(
+    [...rawItems, ...historicalItems].map(item => mapOrderItem(item, boardId, now)), events, now, CONFIG.groups
+  );
 
   return {
     boardName: CONFIG.boardName,
@@ -72,8 +74,7 @@ export async function loadDashboard(boardId) {
     fieldMissingParts: summarize(populations.fieldMissingParts, now, CONFIG.attentionItemLimit),
     fieldWarranty: summarize(populations.fieldWarranty, now, CONFIG.attentionItemLimit),
     other: summarize(populations.other, now, CONFIG.attentionItemLimit),
-    closedCounts,
-    recentShipped: filterWithinLookback(closedItems, currentDateKey, CONFIG.recentShippedDays),
+    ...shipmentReport,
     refreshedAt: now,
     warnings
   };
@@ -103,38 +104,34 @@ async function fetchBoardItems(boardId) {
   return items;
 }
 
-async function fetchActivityClosedItems(boardId, currentDateKey, lookbackDays) {
-  const cutoff = new Date(`${currentDateKey}T00:00:00.000Z`);
-  cutoff.setUTCDate(cutoff.getUTCDate() - (lookbackDays - 1));
-  const end = new Date(`${currentDateKey}T00:00:00.000Z`);
-  end.setUTCDate(end.getUTCDate() + 1);
-  const response = await api(`query ($boardId: ID!) {
+async function fetchShipmentLogs(boardId, from, to) {
+  const response = await api(`query ($boardId: ID!, $from: ISO8601DateTime!, $to: ISO8601DateTime!) {
     boards(ids: [$boardId]) {
       activity_logs(
-        from: ${JSON.stringify(cutoff.toISOString())}
-        to: ${JSON.stringify(end.toISOString())}
+        from: $from
+        to: $to
         limit: 10000
         column_ids: [${JSON.stringify(CONFIG.columns.currentStatus)}]
-      ) { data created_at }
+      ) { id event data created_at }
     }
-  }`, { boardId: String(boardId) });
-  const shippedEvents = new Map();
-
-  for (const log of response.boards?.[0]?.activity_logs || []) {
-    let activity;
-    try { activity = JSON.parse(log.data); } catch { continue; }
-    if (!ACTIVE_GROUP_IDS.has(activity.group_id)) continue;
-    const isShipped = activity.column_id === CONFIG.columns.currentStatus
-      && String(activity.value?.label?.text || '').toLowerCase() === 'shipped';
-    if (!isShipped) continue;
-    const completedAt = parseActivityTimestamp(log.created_at);
-    if (activity.pulse_id) recordLatestEvent(shippedEvents, activity.pulse_id, completedAt);
-    for (const id of activity.pulse_ids || []) recordLatestEvent(shippedEvents, id, completedAt);
+  }`, { boardId: String(boardId), from: from.toISOString(), to: to.toISOString() });
+  const logs = response.boards?.[0]?.activity_logs || [];
+  if (logs.length >= 10000) {
+    if (to - from < 60000) throw new Error('Activity limit reached within one minute; shipment history is incomplete.');
+    const middle = new Date(Math.floor((from.getTime() + to.getTime()) / 2));
+    const left = await fetchShipmentLogs(boardId, from, middle);
+    const right = await fetchShipmentLogs(boardId, middle, to);
+    return [...new Map([...left, ...right].map(log => [log.id, log])).values()];
   }
+  return logs;
+}
 
-  if (!shippedEvents.size) return [];
+async function fetchShipmentEvents(boardId, from, to) {
+  return shipmentEvents(await fetchShipmentLogs(boardId, from, to), CONFIG.columns.currentStatus);
+}
+
+async function fetchItemsById(ids) {
   const rawItems = [];
-  const ids = [...shippedEvents.keys()];
   const columnIds = Object.values(CONFIG.columns);
   for (let offset = 0; offset < ids.length; offset += 100) {
     const responsePage = await api(`query ($itemIds: [ID!], $columnIds: [String!]) {
@@ -147,11 +144,7 @@ async function fetchActivityClosedItems(boardId, currentDateKey, lookbackDays) {
     rawItems.push(...(responsePage.items || []));
   }
 
-  const now = new Date();
-  return rawItems.map(rawItem => ({
-    ...mapOrderItem(rawItem, boardId, now),
-    completedAt: shippedEvents.get(String(rawItem.id))
-  })).filter(item => ACTIVE_GROUP_IDS.has(item.groupId) && item.completedAt);
+  return rawItems;
 }
 
 function mapOrderItem(rawItem, boardId, now) {
@@ -179,13 +172,6 @@ function mapOrderItem(rawItem, boardId, now) {
     supplierTracking: columns[CONFIG.columns.supplierTracking] || '',
     dateShipped: parseDate(columns[CONFIG.columns.dateShipped])
   };
-}
-
-function recordLatestEvent(events, itemId, eventDate) {
-  if (!eventDate) return;
-  const key = String(itemId);
-  const existing = events.get(key);
-  if (!existing || eventDate > existing) events.set(key, eventDate);
 }
 
 async function api(query, variables) {

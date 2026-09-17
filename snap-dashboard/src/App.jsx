@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CONFIG } from './config';
 import { getBoardContext, isMockMode, listenToMonday, loadDashboard } from './mondayData';
+import { shiftDate } from './reporting';
 
 export default function App() {
   const [boardId, setBoardId] = useState(null);
@@ -89,7 +90,7 @@ export default function App() {
       {dashboard.warnings.map(warning => <div className="notice" key={warning}>{warning}</div>)}
 
       <section aria-labelledby="overview-title">
-        <SectionHeading id="overview-title" title="At a glance" subtitle="Open workload classified by the Order Type column" />
+        <SectionHeading id="overview-title" title="At a glance" subtitle="Open workload classified by the Order Type column · cancelled lines excluded" />
         <div className="metric-grid">
           <Metric label="Active board lines" value={activeTotal} note={`${dashboard.other.total} service / draft / other`} tone="navy" />
           <Metric label="Factory SNAPs" value={dashboard.factory.total} note={`${dashboard.factory.newLast30Days} new in 30 days`} tone="blue" />
@@ -99,8 +100,8 @@ export default function App() {
       </section>
 
       <section aria-labelledby="throughput-title">
-        <SectionHeading id="throughput-title" title="Closed throughput" subtitle="Unique lines with a Shipped status, reported by Date Shipped" />
-        <ClosedThroughput counts={dashboard.closedCounts} />
+        <SectionHeading id="throughput-title" title="Shipment totals" subtitle={`SNAP + Field Service combined · completed Central-time days through ${dashboard.shipments.end}`} />
+        <ClosedThroughput counts={dashboard.closedCounts} shipments={dashboard.shipments} />
       </section>
 
       <PopulationPanel title="Factory SNAP orders" subtitle="SNAP order type in the Factory group" report={dashboard.factory} tone="blue" />
@@ -108,12 +109,12 @@ export default function App() {
       <PopulationPanel title="Field warranty orders" subtitle="Warranty order type in the Field Service group" report={dashboard.fieldWarranty} tone="violet" />
 
       <section aria-labelledby="recent-title">
-        <SectionHeading id="recent-title" title={`Shipped in the last ${CONFIG.recentShippedDays} days`} subtitle={`${dashboard.recentShipped.length} recently completed line${dashboard.recentShipped.length === 1 ? '' : 's'}`} />
+        <SectionHeading id="recent-title" title={`Shipped in the last ${CONFIG.recentShippedDays} completed days`} subtitle={`${dashboard.recentShipped.length} shipped lines · Factory SNAP + all Field Service · through ${dashboard.shipments.end}`} />
         <RecentShipments items={dashboard.recentShipped} />
       </section>
 
       <footer>
-        Data is read directly from Monday and recalculated whenever this view refreshes. Only “Shipped” is treated as complete.
+        Data is read directly from Monday and recalculated whenever this view refreshes. Cancelled lines are excluded. Shipment totals require a current “Shipped” status; Date Shipped takes precedence over shipment activity history. Later corrections in Monday can change historical totals.
       </footer>
     </main>
   );
@@ -152,7 +153,7 @@ function PopulationPanel({ title, subtitle, report, tone }) {
   );
 }
 
-function ClosedThroughput({ counts }) {
+function ClosedThroughput({ counts, shipments }) {
   const periods = [
     { days: 7, tone: 'green' },
     { days: 14, tone: 'teal' },
@@ -166,7 +167,7 @@ function ClosedThroughput({ counts }) {
           const count = counts[period.days] || 0;
           return (
             <div className="throughput-row" key={period.days}>
-              <span className="throughput-label">Last {period.days} days</span>
+              <span className="throughput-label">Last {period.days} days<small>{shiftDate(shipments.today, -period.days)} – {shipments.end}</small></span>
               <div className="bar-track" aria-label={`${count} closed in the last ${period.days} days`}>
                 <span className={`bar-fill fill-${period.tone}`} style={{ width: `${count ? Math.max(3, count / maximum * 100) : 0}%` }} />
               </div>
@@ -175,7 +176,7 @@ function ClosedThroughput({ counts }) {
           );
         })}
       </div>
-      <p className="chart-note">Bars share the same scale. Totals use cumulative calendar-day windows.</p>
+      <p className="chart-note">Cumulative totals on the same scale. Today so far: <strong>{shipments.total.today}</strong> (shown separately). Cancelled and reopened lines are excluded.</p>
     </div>
   );
 }

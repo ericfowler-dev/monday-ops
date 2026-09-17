@@ -327,8 +327,10 @@ function renderHtml(data) {
       </td></tr>
       ${renderDataQuality(result, data)}
       ${renderDailySummary(data)}
-      ${renderPopulation('Part 1 — Factory SNAP orders', '#2563eb', '#eff6ff', result.populations.snap, data.userNames, data.shipments.snap, data.openSummary.snap, data.shipments)}
-      ${renderPopulation('Part 2 — Field Service orders', '#0f766e', '#f0fdfa', result.populations.fieldService, data.userNames, data.shipments.fieldService, data.openSummary.fieldService, data.shipments)}
+      ${renderShipmentTotalsChart(data.shipments)}
+      ${renderShipmentChart(data.shipments.total, data.shipments, '#2563eb')}
+      ${renderPopulation('Part 1 — Factory SNAP orders', '#2563eb', '#eff6ff', result.populations.snap, data.userNames, data.openSummary.snap)}
+      ${renderPopulation('Part 2 — Field Service orders', '#0f766e', '#f0fdfa', result.populations.fieldService, data.userNames, data.openSummary.fieldService)}
       ${renderOwnerTrend(buildActionedTrend({
           historyWeeks: data.historyWeeks,
           currentWeekKey: data.currentWeekKey,
@@ -409,13 +411,14 @@ function bottleneckBar(row, maxCurrent, maxPx = 300) {
     if (!row.currentCount) return '';
     const totalPx = Math.max(4, Math.round(row.currentCount / maxCurrent * maxPx));
     if (row.supplierWaiting) {
-        return `<table role="presentation" width="${totalPx}" cellpadding="0" cellspacing="0"><tr><td width="${totalPx}" height="15" bgcolor="#94a3b8" style="font-size:0;line-height:0">&nbsp;</td></tr></table>`;
+        return chartBar([{ width: totalPx, color: '#94a3b8' }], 15);
     }
     const waitingPx = Math.round(row.waiting / row.currentCount * totalPx);
     const activePx = totalPx - waitingPx;
-    const waitingSegment = waitingPx ? `<td width="${waitingPx}" height="15" bgcolor="#dc2626" style="font-size:0;line-height:0">&nbsp;</td>` : '';
-    const activeSegment = activePx ? `<td width="${activePx}" height="15" bgcolor="#93c5fd" style="font-size:0;line-height:0">&nbsp;</td>` : '';
-    return `<table role="presentation" width="${totalPx}" cellpadding="0" cellspacing="0"><tr>${waitingSegment}${activeSegment}</tr></table>`;
+    return chartBar([
+        { width: waitingPx, color: '#dc2626' },
+        { width: activePx, color: '#93c5fd' }
+    ], 15);
 }
 
 function renderAgingBuckets(populations) {
@@ -449,20 +452,41 @@ function renderDailySummary(data) {
     </tr></table></td></tr>`;
 }
 
+function renderShipmentTotalsChart(shipments) {
+    const periods = [[7, '#15803d'], [14, '#0f766e'], [30, '#2563eb']];
+    const maximum = Math.max(1, ...periods.map(([days]) => shipments.total[`last${days}`]));
+    const rows = periods.map(([days, color]) => {
+        const count = shipments.total[`last${days}`];
+        const percent = Math.round(count / maximum * 1000) / 10;
+        const segments = [
+            ...(percent ? [{ width: `${percent}%`, color }] : []),
+            ...(percent < 100 ? [{ width: `${100 - percent}%`, color: '#e7edf5' }] : [])
+        ];
+        return `<tr><td width="110" style="padding:9px 12px 9px 0;font-size:12px;font-weight:700;color:#475569">Last ${days} days<div style="margin-top:4px;font-size:10px;font-weight:400">${weekLabel(shiftDate(shipments.today, -days))}–${weekLabel(shipments.end)}</div></td>
+          <td style="padding:9px 0">${chartBar(segments, 24, '100%')}</td>
+          <td width="60" align="right" style="padding:9px 0 9px 12px;font-size:23px;font-weight:800;color:${color}">${count}</td></tr>`;
+    }).join('');
+    return `${sectionTitle('Shipment totals', `SNAP + Field Service combined · completed Central-time days through ${shipments.end}`)}
+    <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed;background:#f8fafc"><tr><td style="padding:12px 16px">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${rows}</table>
+      <div style="margin-top:10px;font-size:11px;color:#64748b">Cumulative totals on the same scale. Today so far: <b>${shipments.total.today}</b> (shown separately).</div>
+    </td></tr></table></td></tr>`;
+}
+
 function renderShipmentChart(summary, allShipments, color) {
     const max = Math.max(1, ...summary.days.map(day => day.count));
     const bars = summary.days.map(day => {
         const height = day.count ? Math.max(3, Math.round(day.count / max * 100)) : 0;
         return `<td width="7.14%" align="center" valign="bottom" style="padding:0 3px">
-          <div style="font-size:12px;font-weight:800;color:#172033;padding-bottom:5px">${day.count}</div>
-          <table role="presentation" width="70%" cellpadding="0" cellspacing="0"><tr><td height="${height || 1}" bgcolor="${day.count ? color : '#cbd5e1'}" style="font-size:0;line-height:0">&nbsp;</td></tr></table>
+          <div style="font-size:12px;line-height:17px;mso-line-height-rule:exactly;font-weight:800;color:#172033;padding-bottom:5px">${day.count}</div>
+          ${chartBar([{ width: '100%', color: day.count ? color : '#cbd5e1' }], height || 1, '70%', 'center')}
         </td>`;
     }).join('');
     const labels = summary.days.map(day => `<td class="chart-label" align="center" style="padding:6px 0;font-size:10px;color:#475569">${weekLabel(day.date)}</td>`).join('');
     const change = summary.previous7 === 0
         ? (summary.last7 ? `${summary.last7} shipped, up from 0 in the previous 7 days` : 'No shipments in either 7-day period')
         : `${summary.change > 0 ? 'Up' : summary.change < 0 ? 'Down' : 'Unchanged'} ${Math.abs(summary.change)}${summary.change ? ` (${Math.abs(summary.changePct)}%)` : ''} vs previous 7 days`;
-    return `${sectionTitle('Shipped per day — past 14 days', `${weekLabel(summary.days[0].date)}–${weekLabel(allShipments.end)} · completed days · each bar counts shipped order lines`)}
+    return `${sectionTitle('Shipped per day — past 14 days', `SNAP + Field Service combined · ${weekLabel(summary.days[0].date)}–${weekLabel(allShipments.end)} · completed Central-time days`)}
     <tr><td style="padding:0 28px 18px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed;background:#f8fafc"><tr><td style="padding:16px">
       <div style="font-size:15px;font-weight:800;color:${color};margin-bottom:12px">${escapeHtml(change)}</div>
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr height="130">${bars}</tr><tr>${labels}</tr></table>
@@ -470,7 +494,7 @@ function renderShipmentChart(summary, allShipments, color) {
     </td></tr></table></td></tr>`;
 }
 
-function renderPopulation(title, color, background, population, userNames, shipments, open, allShipments) {
+function renderPopulation(title, color, background, population, userNames, open) {
     const totals = population.totals;
     // Scorecard credits the person who made the change, not the department that
     // owned the stage — queue accountability lives in the owner detail tables.
@@ -485,11 +509,9 @@ function renderPopulation(title, color, background, population, userNames, shipm
       <div style="font-size:20px;font-weight:800">${escapeHtml(title)}</div><div style="margin-top:6px;font-size:13px;color:#526078">${title.includes('Field') ? `${open.types.missingParts} Missing Parts · ${open.types.warranty} Warranty · ${open.types.other} Other / mixed · ` : ''}${open.total} open lines</div><div style="margin-top:5px;font-size:12px;color:#526078">Open lines added by order date: ${open.new7} in the last 7 days · ${open.new30} in the last 30 days</div>
     </td></tr>
     <tr><td style="padding:14px 24px 6px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
-      ${metric('Current open', population.currentOpen, `${population.informationalOpen} unowned (supplier / awaiting full order)`, color, '33.33%')}
-      ${metric('Waiting >24h', totals.waiting, `${pctLabel(totals.waitingPct)} of assigned`, totals.waiting ? '#b91c1c' : '#64748b', '33.33%')}
-      ${metric('Shipped · last 7 days', shipments.last7, 'Through yesterday', '#15803d', '33.33%')}
+      ${metric('Current open', population.currentOpen, `${population.informationalOpen} unowned (supplier / awaiting full order)`, color, '50%')}
+      ${metric('Waiting >24h', totals.waiting, `${pctLabel(totals.waitingPct)} of assigned`, totals.waiting ? '#b91c1c' : '#64748b', '50%')}
     </tr></table></td></tr>
-    ${renderShipmentChart(shipments, allShipments, color)}
     ${sectionTitle('Who moved work — last 7 days', 'Actioned = lines a person changed. Handed off = lines they moved onward. Each line counts once per person. ★ marks the most lines actioned. Automated updates are excluded.')}
     <tr><td style="padding:0 28px 20px"><table class="detail-table" role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #dce3ed">
       <tr style="background:#12213f"><th align="left" style="${th()}">Person</th><th align="right" style="${th()}width:60px">Actioned</th><th class="score-bar" align="left" style="${th()}width:160px"></th><th align="right" style="${th()}width:70px">Handed off</th><th class="score-bar" align="left" style="${th()}width:160px"></th></tr>
@@ -503,12 +525,21 @@ function scoreRow(owner, row, isTop, maxValue) {
     return `<tr${isTop ? ' bgcolor="#ecfdf5"' : ''}><td style="${td()}${highlight}font-weight:700">${escapeHtml(owner)}${badge}</td><td align="right" style="${td()}${highlight}font-weight:800;font-size:14px;color:#15803d">${dash(row.actioned)}</td><td class="score-bar" style="${td()}${highlight}">${bar(row.actioned, maxValue, '#15803d')}</td><td align="right" style="${td()}${highlight}font-weight:800;font-size:14px;color:#0369a1">${dash(row.handedOff)}</td><td class="score-bar" style="${td()}${highlight}">${bar(row.handedOff, maxValue, '#0369a1')}</td></tr>`;
 }
 
-// Outlook's Word renderer ignores CSS widths on divs but honors width/bgcolor
-// attributes on table cells, so bars are rendered as single-cell tables.
+// Keep the table, cell and Word paragraph line box the same height and color.
+// A zero line-height with only bgcolor on the cell can leave unpainted bands in
+// classic Outlook. Explicit dimensions also keep short horizontal bars intact.
+function chartBar(segments, height, width = segments.reduce((sum, segment) => sum + segment.width, 0), align = 'left') {
+    const size = value => typeof value === 'number' ? `${value}px` : value;
+    const visible = segments.filter(segment => segment.width);
+    const background = visible[0].color;
+    const cells = visible.map(segment => `<td width="${segment.width}" height="${height}" bgcolor="${segment.color}" style="width:${size(segment.width)};height:${height}px;background-color:${segment.color};padding:0;font-size:1px;mso-line-height-rule:exactly;line-height:${height}px">&nbsp;</td>`).join('');
+    return `<table class="chart-bar" role="presentation" align="${align}" width="${width}" height="${height}" border="0" cellpadding="0" cellspacing="0" bgcolor="${background}" style="width:${size(width)};height:${height}px;background-color:${background};border-collapse:collapse;border-spacing:0;table-layout:fixed;mso-table-lspace:0pt;mso-table-rspace:0pt"><tr height="${height}" style="height:${height}px">${cells}</tr></table>`;
+}
+
 function bar(value, max, color, maxPx = 140) {
     if (!value) return '';
     const px = Math.max(3, Math.round(value / max * maxPx));
-    return `<table role="presentation" cellpadding="0" cellspacing="0"><tr><td width="${px}" height="10" bgcolor="${color}" style="font-size:0;line-height:0">&nbsp;</td></tr></table>`;
+    return chartBar([{ width: px, color }], 10);
 }
 
 function renderOwnerTrend(trend) {

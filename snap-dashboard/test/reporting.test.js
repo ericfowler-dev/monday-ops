@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   classifyOrderPopulation,
-  filterWithinLookback,
+  buildDashboardShipments,
+  isOpenOrder,
   isDateWithinLookback,
-  mergeClosedItems,
   parseDate,
   summarize
 } from '../src/reporting.js';
@@ -20,32 +20,53 @@ test('classifies requested order types without double counting other field work'
   assert.equal(classifyOrderPopulation({ groupId: 'field', orderType: 'Missing Parts, Warranty' }, groups), 'other');
 });
 
-test('mergeClosedItems prefers Date Shipped for current shipped rows', () => {
-  const activityDate = parseDate('2026-07-14');
-  const shippedDate = parseDate('2026-07-15');
-  const merged = mergeClosedItems(
-    [{ id: '1', name: 'Current row', dateShipped: shippedDate }],
-    [{ id: '1', name: 'Activity row', completedAt: activityDate }]
-  );
-  assert.equal(merged.length, 1);
-  assert.equal(merged[0].name, 'Current row');
-  assert.equal(merged[0].completedAt, shippedDate);
+const shipped = (id, date, overrides = {}) => ({ id, name: id, groupId: 'factory', orderType: 'SNAP',
+  state: 'active', currentStatus: 'Shipped', dateShipped: parseDate(date), ...overrides });
+const shipmentNow = new Date('2026-09-17T10:00:00Z');
+
+test('shipments include the oldest completed day, exclude today, and partition populations', () => {
+  const report = buildDashboardShipments([
+    shipped('seven', '2026-09-10'), shipped('fourteen', '2026-09-03'), shipped('thirty', '2026-08-18'),
+    shipped('today', '2026-09-17'), shipped('future', '2026-09-18'), shipped('old', '2026-08-17'),
+    shipped('field', '2026-09-16', { groupId: 'field', orderType: 'Service' }),
+    shipped('unrelated', '2026-09-16', { orderType: 'Other' })
+  ], [], shipmentNow, groups);
+  assert.deepEqual(report.closedCounts, { 7: 2, 14: 3, 30: 4 });
+  assert.equal(report.shipments.snap.last30, 3);
+  assert.equal(report.shipments.fieldService.last30, 1);
+  assert.equal(report.shipments.total.today, 1);
+  assert.deepEqual(report.recentShipped.map(item => item.id), ['field', 'seven']);
 });
 
-test('mergeClosedItems retains activity-only records', () => {
-  const completedAt = parseDate('2026-07-13');
-  const merged = mergeClosedItems([], [{ id: '2', name: 'Removed row', completedAt }]);
-  assert.equal(merged.length, 1);
-  assert.equal(merged[0].completedAt, completedAt);
+test('shipment history cannot count cancelled or reopened lines and is deduplicated', () => {
+  const items = [shipped('shipped', '2026-09-15'), shipped('shipped', '2026-09-15'),
+    shipped('reopened', '2026-09-15', { currentStatus: 'Pending Shipment Approval' }),
+    shipped('cancelled', '2026-09-15', { currentStatus: ' Cancelled ' })];
+  const events = items.map(item => ({ itemId: item.id, at: parseDate('2026-09-15'), groupId: 'factory' }));
+  const report = buildDashboardShipments(items, events, shipmentNow, groups);
+  assert.deepEqual(report.closedCounts, { 7: 1, 14: 1, 30: 1 });
+  assert.deepEqual(report.recentShipped.map(item => item.id), ['shipped']);
 });
 
-test('lookback windows include today and the preceding calendar days', () => {
-  const items = [
-    { completedAt: parseDate('2026-07-15') },
-    { completedAt: parseDate('2026-07-09') },
-    { completedAt: parseDate('2026-07-08') }
-  ];
-  assert.equal(filterWithinLookback(items, '2026-07-15', 7).length, 2);
+test('Date Shipped wins and moved rows use shipment group and Central event date as fallback', () => {
+  const report = buildDashboardShipments([
+    shipped('dated', '2026-08-01'),
+    shipped('moved', null, { groupId: 'archive', orderType: 'Warranty' })
+  ], [
+    { itemId: 'dated', at: parseDate('2026-09-15'), groupId: 'factory' },
+    { itemId: 'moved', at: new Date('2026-09-17T02:00:00Z'), groupId: 'field' }
+  ], shipmentNow, groups);
+  assert.equal(report.shipments.snap.last30, 0);
+  assert.equal(report.shipments.fieldService.last7, 1);
+  assert.equal(report.shipments.total.today, 0);
+  assert.equal(report.recentShipped[0].completedAt.toISOString().slice(0, 10), '2026-09-16');
+});
+
+test('open workload excludes cancelled and shipped lines while retaining reopened work', () => {
+  assert.equal(isOpenOrder(shipped('1', null, { currentStatus: ' Cancelled ' })), false);
+  assert.equal(isOpenOrder(shipped('2', null)), false);
+  assert.equal(isOpenOrder(shipped('3', null, { currentStatus: 'Pending Shipment Approval' })), true);
+  assert.equal(isOpenOrder(shipped('4', null, { currentStatus: 'FAB', state: 'archived' })), false);
 });
 
 test('order-date lookbacks use calendar days and exclude future dates', () => {

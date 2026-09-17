@@ -12,6 +12,7 @@
     "test": "node --test"
   },
   "dependencies": {
+    "@monday-ops/reporting-core": "file:./shared",
     "monday-sdk-js": "0.5.9",
     "react": "19.2.7",
     "react-dom": "19.2.7"

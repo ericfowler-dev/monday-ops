@@ -1,0 +1,6 @@
+{
+  "name": "@monday-ops/reporting-core",
+  "version": "1.0.0",
+  "private": true,
+  "main": "movement-daily-core.cjs"
+}

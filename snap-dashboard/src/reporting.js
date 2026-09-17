@@ -1,15 +1,33 @@
+import movementReporting from '@monday-ops/reporting-core';
+
+const { buildShipmentSummary, shipmentEvents, shiftDate, statusIs } = movementReporting;
+export { shipmentEvents, shiftDate };
+
+export function isOpenOrder(item) {
+  return item.state === 'active' && !statusIs(item.currentStatus, 'Shipped') && !statusIs(item.currentStatus, 'Cancelled');
+}
+
+// Both surfaces use the same shipment rules, including completed Central-time
+// days, current Shipped status, Date Shipped precedence, and event fallback.
+export function buildDashboardShipments(items, events, now, groups) {
+  const shipments = buildShipmentSummary({
+    items: items.map(item => ({ ...item, status: item.currentStatus,
+      isSnapOrder: String(item.orderType || '').split(',').some(value => value.trim().toLowerCase() === 'snap') })),
+    events, now, snapGroupId: groups.factory, fieldServiceGroupId: groups.field
+  });
+  const closedCounts = Object.fromEntries([7, 14, 30].map(days => [days, shipments.total[`last${days}`]]));
+  const recentShipped = shipments.records
+    .filter(record => record.date >= shiftDate(shipments.today, -7) && record.date <= shipments.end)
+    .map(record => ({ ...record.item, completedAt: parseDate(record.date) }))
+    .sort((a, b) => b.completedAt - a.completedAt || a.name.localeCompare(b.name));
+  return { shipments, closedCounts, recentShipped };
+}
+
 export function parseDate(value) {
   if (!value) return null;
   const date = /^\d{4}-\d{2}-\d{2}$/.test(value)
     ? new Date(`${value}T12:00:00.000Z`)
     : new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-export function parseActivityTimestamp(value) {
-  const timestamp = Number(value);
-  if (!Number.isFinite(timestamp)) return null;
-  const date = new Date(Math.round(timestamp / 10000));
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
@@ -34,33 +52,6 @@ export function dateKeyForTimeZone(date, timeZone) {
   }).formatToParts(date);
   const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
   return `${values.year}-${values.month}-${values.day}`;
-}
-
-export function dateKeyToUtc(dateKey) {
-  return new Date(`${dateKey}T00:00:00.000Z`);
-}
-
-export function filterWithinLookback(items, currentDateKey, lookbackDays) {
-  const cutoff = dateKeyToUtc(currentDateKey);
-  cutoff.setUTCDate(cutoff.getUTCDate() - (lookbackDays - 1));
-  const end = dateKeyToUtc(currentDateKey);
-  end.setUTCDate(end.getUTCDate() + 1);
-  return items.filter(item => item.completedAt >= cutoff && item.completedAt < end);
-}
-
-export function mergeClosedItems(currentShipped, activityClosedItems) {
-  const itemsById = new Map(activityClosedItems.map(item => [String(item.id), item]));
-  for (const item of currentShipped) {
-    const activityItem = itemsById.get(String(item.id));
-    itemsById.set(String(item.id), {
-      ...activityItem,
-      ...item,
-      completedAt: item.dateShipped || activityItem?.completedAt || null
-    });
-  }
-  return [...itemsById.values()]
-    .filter(item => item.completedAt)
-    .sort((a, b) => b.completedAt - a.completedAt || a.name.localeCompare(b.name));
 }
 
 export function classifyOrderPopulation(item, groups) {
