@@ -7,6 +7,10 @@ const { normalizeBoardActivityLogs, computeDynamicOwnerActivity, buildWeeklySnap
 const { pruneWeeks, ownerFor } = require('./weekly-movement-core');
 const { createHistoryStore } = require('./dynamic-owner-history-store');
 const { isCancelled, shipmentEvents, buildShipmentSummary, summarizeOpenOrders, isDstCompanionRun, shiftDate } = require('./movement-daily-core');
+const { createKpiStore } = require('./missing-parts-kpi-store');
+const { monthBounds } = require('./missing-parts-kpi-core');
+const { prepareKpi, writeKpiExtract } = require('./missing-parts-kpi-runtime');
+const { renderKpiTable } = require('./missing-parts-kpi-render');
 
 const MONDAY_API_VERSION = process.env.MONDAY_API_VERSION || '2026-07';
 const WINDOW_DAYS = 7;
@@ -20,7 +24,9 @@ const ITEM_COLUMN_IDS = [
     config.COL_IDS.CURRENT_STATUS,
     config.COL_IDS.ORDER_DATE,
     config.COL_IDS.PRIORITY,
-    config.COL_IDS.DATE_SHIPPED
+    config.COL_IDS.DATE_SHIPPED,
+    config.COL_IDS.CUSTOMER,
+    config.COL_IDS.PART_NUMBER
 ];
 
 // Deliberately narrow: these fields represent a meaningful workflow action.
@@ -45,14 +51,25 @@ const QUALIFYING_COLUMNS = [
 ].filter(column => column.id);
 
 async function generateReport() {
-    const args = new Set(process.argv.slice(2));
+    const argumentList = process.argv.slice(2);
+    const args = new Set(argumentList);
+    const option = name => {
+        const index = argumentList.indexOf(name);
+        if (index < 0) return undefined;
+        const value = argumentList[index + 1];
+        if (!value || value.startsWith('--')) throw new Error(`${name} requires a value.`);
+        return value;
+    };
     if (args.has('--check-delivery-config')) {
         console.log(JSON.stringify({ recipients: deliveryRecipients(), commit: process.env.RENDER_GIT_COMMIT || 'local', schedule: '5 AM America/Chicago, Monday-Friday' }));
         return;
     }
     const deliveryMode = args.has('--send') || process.env.SEND_EMAIL === '1';
     const dryRun = args.has('--dry-run') || process.env.DRY_RUN === '1';
-    const now = new Date();
+    const sourcePath = option('--source-file');
+    if (sourcePath && deliveryMode && !dryRun) throw new Error('A frozen source file can only be used in preview/dry-run mode.');
+    const fixture = sourcePath ? JSON.parse(fs.readFileSync(sourcePath, 'utf8')) : null;
+    const now = fixture ? new Date(fixture.fetchedAt) : new Date();
     if (deliveryMode && !dryRun && process.env.RENDER === 'true' && !args.has('--force') && isDstCompanionRun(now)) {
         console.log('No email sent: skipping the unused daylight-saving companion hour. The scheduled delivery is 5 AM Central.');
         return;
@@ -60,90 +77,131 @@ async function generateReport() {
     const fromDate = new Date(now.getTime() - WINDOW_DAYS * 86400000);
     console.log(`Building dynamic-owner ${deliveryMode ? 'report' : 'preview'} for ${fromDate.toISOString()} through ${now.toISOString()}...`);
 
-    const [currentRawItems, rawLogs, shipmentLogs, historyWeeks] = await Promise.all([
-        fetchCurrentRelevantItems(),
-        fetchBoardActivity(fromDate, now),
-        fetchBoardActivity(new Date(`${shiftDate(formatDateKey(now), -31)}T00:00:00Z`), now, true),
-        readHistoryWeeks()
-    ]);
-    const shippedEvents = shipmentEvents(shipmentLogs, config.COL_IDS.CURRENT_STATUS);
-    const allEvents = normalizeBoardActivityLogs(rawLogs, QUALIFYING_COLUMNS, { excludedActorIds: config.EXCLUDED_ACTOR_IDS });
-    const relevantGroups = new Set([config.SNAP_GROUP_ID, config.FIELD_SERVICE_GROUP_ID]);
-    const knownIds = new Set(currentRawItems.map(item => String(item.id)));
-    const historyItemIds = Object.values(historyWeeks).flatMap(week => ['snap', 'fieldService'].flatMap(pop =>
-        (week.populations?.[pop]?.actorRows || []).flatMap(row => row.actionedItemIds || [])));
-    const historicalCandidateIds = [...new Set([...allEvents
-        .filter(event => relevantGroups.has(event.groupId)
-            || relevantGroups.has(event.sourceGroupId)
-            || relevantGroups.has(event.destinationGroupId))
-        .map(event => event.itemId), ...shippedEvents.map(event => event.itemId), ...historyItemIds])].filter(id => !knownIds.has(id));
-    const recoveredRawItems = await fetchItemsById(historicalCandidateIds);
-    const allItems = [...currentRawItems, ...recoveredRawItems].map(raw => mapItem(raw, now));
-    const excludedItemIds = new Set(allItems.filter(isCancelled).map(item => item.id));
-    // Missing historical records cannot be verified as non-cancelled, so omit
-    // their old person-credit contributions too.
-    const retrievedIds = new Set(allItems.map(item => item.id));
-    for (const id of historyItemIds) if (!retrievedIds.has(id)) excludedItemIds.add(id);
-    const items = allItems.filter(item => !isCancelled(item));
-    const itemIds = new Set(items.map(item => item.id));
-    const events = allEvents.filter(event => itemIds.has(event.itemId));
-    const actorIds = [...new Set(events.map(event => event.actorUserId).filter(id => id && id !== 'unknown'))];
-    const userNames = await fetchUserNames(actorIds);
-
-    const result = computeDynamicOwnerActivity({
-        items,
-        events,
-        fromDate,
-        refDate: now,
-        ownerMap: config.OWNER_MAP,
-        snapGroupId: config.SNAP_GROUP_ID,
-        fieldServiceGroupId: config.FIELD_SERVICE_GROUP_ID,
-        closedStatuses: config.CLOSED_CURRENT_STATUSES,
-        waitingHours: WAITING_HOURS,
-        pastDueDays: config.PAST_DUE_DAYS
-    });
-
-    const shipments = buildShipmentSummary({ items, events: shippedEvents, now,
-        snapGroupId: config.SNAP_GROUP_ID, fieldServiceGroupId: config.FIELD_SERVICE_GROUP_ID });
-    result.closure = shipments.closure;
-    result.populations.snap.closedOrders = shipments.snap.last7;
-    result.populations.fieldService.closedOrders = shipments.fieldService.last7;
-    result.executive.closedOrders = shipments.total.last7;
-    const html = renderHtml({
-        now,
-        fromDate,
-        result,
-        events,
-        items,
-        userNames,
-        historyWeeks,
-        shipments,
-        openSummary: summarizeOpenOrders(items, now),
-        excludedItemIds,
-        unavailableShipments: new Set(shippedEvents.filter(event => !retrievedIds.has(event.itemId)).map(event => event.itemId)).size,
-        currentWeekKey: formatDateKey(now),
-        send: deliveryMode,
-        activityLimitReached: false,
-        rawLogCount: rawLogs.length
-    });
-    const outputPath = saveHtml(html, now, deliveryMode);
-    if (deliveryMode && !dryRun) {
-        if (process.env.RENDER === 'true' && !process.env.REDIS_URL) throw new Error('REDIS_URL is required for daily delivery protection.');
-        const store = await createHistoryStore();
-        const key = formatDateKey(now);
-        let claimed = false;
-        try {
-            claimed = await store.claimDelivery(key);
-            if (!claimed) { console.log(`Report already delivered or in progress for ${key}; no email sent.`); return; }
-            await sendEmail(html, now);
-            await store.markDelivered(key);
-            if (isSnapshotDay(now)) await persistSnapshot(result, items, now, userNames);
-        } finally {
-            if (claimed) await store.releaseDelivery(key);
-            await store.close();
+    const kpiEnabled = process.env.MISSING_PARTS_KPI_ENABLED === '1';
+    const kpiStore = kpiEnabled ? await createKpiStore({ filePath: option('--kpi-state') }) : null;
+    try {
+        const kpiState = kpiStore ? await kpiStore.read() : null;
+        const kpiFrom = kpiState?.lastCapturedAt || monthBounds(formatDateKey(now).slice(0, 7)).start;
+        const logsInWindow = (from, statusOnly = false) => fixture.logs.filter(log => {
+            const at = Math.round(Number(log.created_at) / 10000);
+            if (at < new Date(from).getTime() || at > now.getTime()) return false;
+            return !statusOnly || JSON.parse(log.data).column_id === config.COL_IDS.CURRENT_STATUS;
+        });
+        const shipmentFrom = new Date(`${shiftDate(formatDateKey(now), -31)}T00:00:00Z`);
+        const [boardRawItems, rawLogs, shipmentLogs, historyWeeks, kpiLogs, boardColumns] = await Promise.all([
+            fixture ? fixture.items : fetchCurrentRelevantItems(kpiEnabled),
+            fixture ? logsInWindow(fromDate) : fetchBoardActivity(fromDate, now),
+            fixture ? logsInWindow(shipmentFrom, true) : fetchBoardActivity(shipmentFrom, now, true),
+            fixture ? readLocalHistoryWeeks() : readHistoryWeeks(),
+            !kpiEnabled ? [] : fixture ? logsInWindow(kpiFrom) : fetchBoardActivity(new Date(kpiFrom), now),
+            !kpiEnabled ? [] : fixture ? fixture.metadata.columns : fetchBoardColumns()
+        ]);
+        const currentRawItems = boardRawItems.filter(item => [config.SNAP_GROUP_ID, config.FIELD_SERVICE_GROUP_ID].includes(item.group?.id));
+        const shippedEvents = shipmentEvents(shipmentLogs, config.COL_IDS.CURRENT_STATUS);
+        const allEvents = normalizeBoardActivityLogs(rawLogs, QUALIFYING_COLUMNS, { excludedActorIds: config.EXCLUDED_ACTOR_IDS });
+        const relevantGroups = new Set([config.SNAP_GROUP_ID, config.FIELD_SERVICE_GROUP_ID]);
+        const knownIds = new Set(currentRawItems.map(item => String(item.id)));
+        const historyItemIds = Object.values(historyWeeks).flatMap(week => ['snap', 'fieldService'].flatMap(pop =>
+            (week.populations?.[pop]?.actorRows || []).flatMap(row => row.actionedItemIds || [])));
+        const historicalCandidateIds = [...new Set([...allEvents
+            .filter(event => relevantGroups.has(event.groupId)
+                || relevantGroups.has(event.sourceGroupId)
+                || relevantGroups.has(event.destinationGroupId))
+            .map(event => event.itemId), ...shippedEvents.map(event => event.itemId), ...historyItemIds])].filter(id => !knownIds.has(id));
+        const recoveredRawItems = fixture ? fixture.recovered.filter(item => item.state === 'active' && historicalCandidateIds.includes(String(item.id))) : await fetchItemsById(historicalCandidateIds);
+        const allItems = [...currentRawItems, ...recoveredRawItems].map(raw => mapItem(raw, now));
+        const excludedItemIds = new Set(allItems.filter(isCancelled).map(item => item.id));
+        // Missing historical records cannot be verified as non-cancelled, so omit
+        // their old person-credit contributions too.
+        const retrievedIds = new Set(allItems.map(item => item.id));
+        for (const id of historyItemIds) if (!retrievedIds.has(id)) excludedItemIds.add(id);
+        const items = allItems.filter(item => !isCancelled(item));
+        const itemIds = new Set(items.map(item => item.id));
+        const events = allEvents.filter(event => itemIds.has(event.itemId));
+        const actorIds = [...new Set(events.map(event => event.actorUserId).filter(id => id && id !== 'unknown'))];
+        const userNames = fixture?.userNames ? new Map(Object.entries(fixture.userNames)) : await fetchUserNames(actorIds);
+        let kpiPrepared;
+        if (kpiEnabled) {
+            const boardIds = new Set(boardRawItems.map(item => String(item.id)));
+            const candidateIds = new Set(Object.keys(kpiState.ledger));
+            for (const log of kpiLogs) {
+                let data; try { data = JSON.parse(log.data); } catch { continue; }
+                for (const id of [data.pulse_id, data.pulse?.id, ...(data.pulse_ids || [])].filter(Boolean)) candidateIds.add(String(id));
+            }
+            const recoverIds = [...candidateIds].filter(id => !boardIds.has(id));
+            const recovered = fixture ? fixture.recovered.filter(item => recoverIds.includes(String(item.id))) : await fetchItemsById(recoverIds, true);
+            const allKpiRaw = [...boardRawItems, ...recovered.filter(item => !item.board || String(item.board.id) === config.BOARD_ID)];
+            const recoveredIds = new Set(allKpiRaw.map(item => String(item.id)));
+            kpiPrepared = prepareKpi(kpiState, { rawItems: allKpiRaw, logs: kpiLogs, columns: boardColumns, now,
+                activityFrom: kpiFrom, unavailableIds: recoverIds.filter(id => !recoveredIds.has(id)) });
+            const extractDirectory = option('--output-dir') || path.join(__dirname, 'exports', 'missing-parts-kpi', formatDateKey(now));
+            console.log(`KPI extract saved: ${writeKpiExtract(kpiPrepared, extractDirectory)}`);
         }
-    }
-    logSummary(result, items, events, rawLogs.length, outputPath, deliveryMode, dryRun, userNames);
+
+        const result = computeDynamicOwnerActivity({
+            items,
+            events,
+            fromDate,
+            refDate: now,
+            ownerMap: config.OWNER_MAP,
+            snapGroupId: config.SNAP_GROUP_ID,
+            fieldServiceGroupId: config.FIELD_SERVICE_GROUP_ID,
+            closedStatuses: config.CLOSED_CURRENT_STATUSES,
+            waitingHours: WAITING_HOURS,
+            pastDueDays: config.PAST_DUE_DAYS
+        });
+
+        const shipments = buildShipmentSummary({ items, events: shippedEvents, now,
+            snapGroupId: config.SNAP_GROUP_ID, fieldServiceGroupId: config.FIELD_SERVICE_GROUP_ID });
+        result.closure = shipments.closure;
+        result.populations.snap.closedOrders = shipments.snap.last7;
+        result.populations.fieldService.closedOrders = shipments.fieldService.last7;
+        result.executive.closedOrders = shipments.total.last7;
+        const html = renderHtml({
+            now,
+            fromDate,
+            result,
+            events,
+            items,
+            userNames,
+            historyWeeks,
+            shipments,
+            openSummary: summarizeOpenOrders(items, now),
+            excludedItemIds,
+            unavailableShipments: new Set(shippedEvents.filter(event => !retrievedIds.has(event.itemId)).map(event => event.itemId)).size,
+            currentWeekKey: formatDateKey(now),
+            send: deliveryMode,
+            activityLimitReached: false,
+            rawLogCount: rawLogs.length,
+            kpiView: kpiPrepared?.view
+        });
+        const outputDirectory = option('--output-dir');
+        const outputPath = outputDirectory ? path.join(path.resolve(outputDirectory), 'movement-with-missing-parts-kpi.html') : saveHtml(html, now, deliveryMode);
+        if (outputDirectory) { fs.mkdirSync(path.dirname(outputPath), { recursive: true }); fs.writeFileSync(outputPath, html, 'utf8'); }
+        if (deliveryMode && !dryRun) {
+            if (process.env.RENDER === 'true' && !process.env.REDIS_URL) throw new Error('REDIS_URL is required for daily delivery protection.');
+            const store = await createHistoryStore();
+            const key = formatDateKey(now);
+            let claimed = false;
+            try {
+                claimed = await store.claimDelivery(key);
+                if (!claimed) { console.log(`Report already delivered or in progress for ${key}; no email sent.`); return; }
+                // Durable daily KPI capture is independent of Monday-only actor history.
+                if (kpiPrepared) await kpiStore.save(kpiPrepared.candidate, kpiState.revision);
+                await sendEmail(html, now, kpiPrepared?.attachments || []);
+                await store.markDelivered(key);
+                if (isSnapshotDay(now)) await persistSnapshot(result, items, now, userNames);
+            } finally {
+                if (claimed) await store.releaseDelivery(key);
+                await store.close();
+            }
+        }
+        logSummary(result, items, events, rawLogs.length, outputPath, deliveryMode, dryRun, userNames);
+    } finally { if (kpiStore) await kpiStore.close(); }
+}
+function readLocalHistoryWeeks() {
+    const file = path.join(__dirname, 'history-dynamic-owner.json');
+    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')).weeks || {} : {};
 }
 
 // Non-fatal by design: the email has already been sent, and trend history can
@@ -218,7 +276,7 @@ async function mondayQuery(query, variables = {}) {
     return payload.data;
 }
 
-async function fetchCurrentRelevantItems() {
+async function fetchCurrentRelevantItems(allGroups = false) {
     const result = [];
     const relevantGroups = new Set([config.SNAP_GROUP_ID, config.FIELD_SERVICE_GROUP_ID]);
     const columnIds = ITEM_COLUMN_IDS;
@@ -228,31 +286,37 @@ async function fetchCurrentRelevantItems() {
             boards(ids: $boardIds) {
                 items_page(limit: 500, cursor: $cursor) {
                     cursor
-                    items { id name state created_at group { id title } column_values(ids: $columnIds) { id text } }
+                    items { id name state created_at group { id title } column_values(ids: $columnIds) { id text value } }
                 }
             }
         }`, { boardIds: [config.BOARD_ID], cursor, columnIds });
         const page = data.boards[0]?.items_page;
         for (const item of page?.items || []) {
-            if (relevantGroups.has(item.group?.id)) result.push(item);
+            if (allGroups || relevantGroups.has(item.group?.id)) result.push(item);
         }
         cursor = page?.cursor || null;
     } while (cursor);
     return result;
 }
 
-async function fetchItemsById(ids) {
+async function fetchItemsById(ids, includeNonActive = false) {
     const result = [];
     const columnIds = ITEM_COLUMN_IDS;
     for (let offset = 0; offset < ids.length; offset += 100) {
         const data = await mondayQuery(`query ($itemIds: [ID!], $columnIds: [String!]) {
-            items(ids: $itemIds, limit: 100) {
-                id name state created_at group { id title } column_values(ids: $columnIds) { id text }
+            items(ids: $itemIds, limit: 100${includeNonActive ? ', exclude_nonactive: false' : ''}) {
+                id name state created_at board { id } group { id title } column_values(ids: $columnIds) { id text value }
             }
         }`, { itemIds: ids.slice(offset, offset + 100), columnIds });
         result.push(...(data.items || []));
     }
     return result;
+}
+
+async function fetchBoardColumns() {
+    const data = await mondayQuery('query($ids:[ID!]){boards(ids:$ids){columns{id title type settings_str}}}', { ids: [config.BOARD_ID] });
+    if (!data.boards[0]) throw new Error('Order Tracker metadata unavailable.');
+    return data.boards[0].columns;
 }
 
 async function fetchBoardActivity(fromDate, toDate, statusOnly = false) {
@@ -331,6 +395,7 @@ function renderHtml(data) {
       ${renderShipmentChart(data.shipments.total, data.shipments, '#2563eb')}
       ${renderPopulation('Part 1 — Factory SNAP orders', '#2563eb', '#eff6ff', result.populations.snap, data.userNames, data.openSummary.snap)}
       ${renderPopulation('Part 2 — Field Service orders', '#0f766e', '#f0fdfa', result.populations.fieldService, data.userNames, data.openSummary.fieldService)}
+      ${data.kpiView ? renderKpiTable(data.kpiView, { email: true }) : ''}
       ${renderOwnerTrend(buildActionedTrend({
           historyWeeks: data.historyWeeks,
           currentWeekKey: data.currentWeekKey,
@@ -605,8 +670,8 @@ function saveHtml(html, now, send) {
     return outputPath;
 }
 
-async function sendEmail(html, now) {
-    const recipients = deliveryRecipients();
+async function sendEmail(html, now, attachments = [], options = {}) {
+    const recipients = options.recipients || deliveryRecipients();
     if (!process.env.M365_TENANT_ID || !process.env.M365_CLIENT_ID || !process.env.M365_CLIENT_SECRET || !process.env.M365_SENDER_UPN) {
         throw new Error('Microsoft Graph mail settings are incomplete.');
     }
@@ -627,9 +692,10 @@ async function sendEmail(html, now) {
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
             message: {
-                subject: `Open Order Workflow Movement Report ${formatSubjectDate(now)}`,
+                subject: options.subject || `Open Order Workflow Movement Report ${formatSubjectDate(now)}`,
                 body: { contentType: 'HTML', content: html },
-                toRecipients: recipients.map(address => ({ emailAddress: { address } }))
+                toRecipients: recipients.map(address => ({ emailAddress: { address } })),
+                attachments
             },
             saveToSentItems: true
         })
@@ -677,4 +743,5 @@ if (require.main === module) {
     generateReport().catch(error => { console.error(`Fatal error: ${error.message}`); process.exitCode = 1; });
 }
 
-module.exports = { renderBottleneck, renderHtml, renderShipmentChart, mapItem, fetchBoardActivity, generateReport };
+module.exports = { renderBottleneck, renderHtml, renderShipmentChart, mapItem, fetchBoardActivity, generateReport,
+    fetchCurrentRelevantItems, fetchBoardColumns, fetchItemsById, sendEmail };

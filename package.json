@@ -16,12 +16,17 @@
     "movement:legacy-preview": "node generate-weekly-movement-report.js --force --dry-run",
     "movement:dynamic-preview": "node generate-dynamic-owner-preview.js",
     "movement:test": "node --test weekly-movement-core.test.js dynamic-owner-activity-core.test.js generate-dynamic-owner-preview.test.js movement-daily-core.test.js",
+    "kpi:test": "node --test missing-parts-kpi.test.js missing-parts-kpi-report.test.js",
+    "kpi:manage": "node manage-missing-parts-kpi.js",
+    "kpi:preview": "node generate-missing-parts-kpi-report.js",
+    "kpi:capture": "node capture-missing-parts-kpi.js --apply",
     "snap:dashboard:dev": "npm --prefix snap-dashboard run dev:mock",
     "snap:dashboard:test": "npm --prefix snap-dashboard test",
     "snap:dashboard:build": "npm --prefix snap-dashboard run build",
     "snap:approval:dev": "npm --prefix SNAP-FORM/snap-approval-poc run dev",
     "snap:approval:test": "npm --prefix SNAP-FORM/snap-approval-poc test",
-    "snap:approval:build": "npm --prefix SNAP-FORM/snap-approval-poc run build"
+    "snap:approval:build": "npm --prefix SNAP-FORM/snap-approval-poc run build",
+    "kpi:report": "node generate-missing-parts-kpi-report.js --send"
   },
   "dependencies": {
     "@microsoft/microsoft-graph-client": "^3.0.7",

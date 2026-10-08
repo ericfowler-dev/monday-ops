@@ -11,9 +11,10 @@ const HISTORY_FILE = path.join(__dirname, 'history-dynamic-owner.json');
 const REDIS_HISTORY_KEY = process.env.DYNAMIC_REDIS_HISTORY_KEY || 'dynamic:history';
 const REDIS_LAST_RUN_KEY = process.env.DYNAMIC_REDIS_LAST_RUN_KEY || 'dynamic:last-run';
 
-async function createHistoryStore() {
+async function createHistoryStore({deliveryNamespace='dynamic'}={}) {
+    if(!/^[a-z0-9-]+$/.test(deliveryNamespace))throw new Error('Invalid delivery namespace.');
     if (!process.env.REDIS_URL) {
-        return createFileHistoryStore();
+        return createFileHistoryStore(deliveryNamespace);
     }
     const client = createClient({ url: process.env.REDIS_URL, socket: { connectTimeout: 10000, reconnectStrategy: false } });
     client.on('error', error => console.error(`Redis error: ${error.message}`));
@@ -27,17 +28,17 @@ async function createHistoryStore() {
         async writeHistory(history) { await client.set(REDIS_HISTORY_KEY, JSON.stringify(history)); },
         async writeLastRun(dateKey) { await client.set(REDIS_LAST_RUN_KEY, dateKey); },
         async claimDelivery(dateKey) {
-            if (await client.exists(`dynamic:sent:${dateKey}`)) return false;
-            return Boolean(await client.set(`dynamic:sending:${dateKey}`, '1', { NX: true, EX: 900 }));
+            if (await client.exists(`${deliveryNamespace}:sent:${dateKey}`)) return false;
+            return Boolean(await client.set(`${deliveryNamespace}:sending:${dateKey}`, '1', { NX: true, EX: 900 }));
         },
-        async markDelivered(dateKey) { await client.set(`dynamic:sent:${dateKey}`, '1', { EX: 86400 * 45 }); },
-        async releaseDelivery(dateKey) { await client.del(`dynamic:sending:${dateKey}`); },
+        async markDelivered(dateKey) { await client.set(`${deliveryNamespace}:sent:${dateKey}`, '1', { EX: 86400 * 45 }); },
+        async releaseDelivery(dateKey) { await client.del(`${deliveryNamespace}:sending:${dateKey}`); },
         async close() { if (client.isOpen) await client.quit(); }
     };
 }
 
-function createFileHistoryStore() {
-    const sentFile = path.join(__dirname, 'exports', 'movement-deliveries.json');
+function createFileHistoryStore(deliveryNamespace='dynamic') {
+    const sentFile = path.join(__dirname, 'exports', deliveryNamespace==='dynamic'?'movement-deliveries.json':`${deliveryNamespace}-deliveries.json`);
     const readSent = () => fs.existsSync(sentFile) ? JSON.parse(fs.readFileSync(sentFile, 'utf8')) : {};
     return {
         kind: 'file',

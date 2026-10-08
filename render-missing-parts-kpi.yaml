@@ -1,0 +1,54 @@
+# Separate KPI email and daily evidence capture, alongside existing reports.
+# Render schedules use UTC; the scripts select the correct Central/DST hour.
+envVarGroups:
+  - name: missing-parts-kpi-settings
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONDAY_API_TOKEN
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: M365_TENANT_ID
+        sync: false
+      - key: M365_CLIENT_ID
+        sync: false
+      - key: M365_CLIENT_SECRET
+        sync: false
+      - key: M365_SENDER_UPN
+        sync: false
+      - key: MISSING_PARTS_KPI_TO_EMAIL
+        value: efowler@psiengines.com
+      - key: MISSING_PARTS_KPI_WEEKDAY
+        value: '1'
+      - key: MISSING_PARTS_KPI_SEND_HOUR
+        value: '7'
+      - key: MISSING_PARTS_KPI_CAPTURE_HOUR
+        value: '4'
+services:
+  - type: cron
+    name: missing-parts-kpi-report
+    runtime: node
+    plan: starter
+    repo: https://github.com/ericfowler-dev/monday-ops
+    branch: missing-parts-kpi-report
+    autoDeployTrigger: off
+    # Daily evaluation ensures the first is included even on weekends.
+    # The script sends only Mondays or the first; one per Central date.
+    schedule: '0 12,13 * * *'
+    buildCommand: npm ci
+    startCommand: node generate-missing-parts-kpi-report.js --send
+    envVars:
+      - fromGroup: missing-parts-kpi-settings
+  - type: cron
+    name: missing-parts-kpi-capture
+    runtime: node
+    plan: starter
+    repo: https://github.com/ericfowler-dev/monday-ops
+    branch: missing-parts-kpi-report
+    autoDeployTrigger: off
+    schedule: '0 9,10 * * *'
+    buildCommand: npm ci
+    startCommand: node capture-missing-parts-kpi.js --apply
+    envVars:
+      - fromGroup: missing-parts-kpi-settings

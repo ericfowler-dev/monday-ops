@@ -21,6 +21,98 @@ Detailed order/customer/tracking information remains in the live Monday views.
 The report covers Factory SNAP and Field Service, not the whole board's drafts
 and other factory request groups. Counts are board lines, not ordered quantity.
 
+## Missing Parts KPI implementation (October 8, 2026; pending deployment)
+
+Following Eric's review, the KPI is a separate email, with four rows: Factory
+SNAPs - New Issues; Field Missing Parts - New Issues; Factory SNAPs - Backorders;
+Field Snaps - Backorders. Each measure counts distinct order lines, not part
+quantities. Combined backorders are omitted from the email and CSV extracts.
+It does not use seven-day activity/shipment aggregation.
+The movement email omits KPI collection/sections by default; the optional
+`MISSING_PARTS_KPI_ENABLED=1` integration is retained for future use.
+
+The standalone entry point is `generate-missing-parts-kpi-report.js --send`.
+Confirmed distribution: **efowler@psiengines.com, Mondays and the first of each
+month at 7:00 AM America/Chicago**, observing daylight-saving changes. An overlap
+produces one email. Both CSVs are attached; the focused HTML extract uses the same
+calculation and evidence. Separate Redis delivery keys prevent a movement email
+from suppressing a KPI email. Graph attachment format:
+https://learn.microsoft.com/en-us/graph/api/user-sendmail.
+
+**Definitions:** calendar months in America/Chicago; distinct Monday line IDs by
+Order Date, including already shipped lines. Factory = SNAPs group + SNAP type.
+Field = Field Service Orders + Missing Parts, excluding Warranty/mixed types.
+Backorders = active unshipped, non-cancelled lines at the exact month-end cutoff;
+Shipped to Darien remains open. The cutoff's status and category govern historical
+intake and backlog. Missing dates/status and unretrievable lines remain exceptions.
+Accepted values never follow later current-status cancellation filters.
+
+`missing-parts-kpi-core.js` owns calculation, item-version ledger, daily snapshots,
+month-end boundaries, acceptance and explicit corrections. Immutable source
+versions store item IDs, category, status, Order Date and activity/control source
+IDs. Snapshots record cutoff, capture time, source, completeness and exceptions.
+The separate Redis key is `missing-parts-kpi:v1`, with atomic revision checks;
+production refuses an ephemeral file fallback. Local development uses
+`history-missing-parts-kpi.json`, atomically saved and gitignored. Concurrent writers
+fail and must reload, rather than overwrite another capture/correction. Daily
+observations and accepted source versions are append-only; no automatic retention
+purge removes accepted periods.
+
+**Deployment draft:** `render-missing-parts-kpi.yaml` declares the separate email
+and collector jobs, with independent credentials/settings in an environment group.
+The email schedule is `0 12,13 * * *` UTC, with a Central day/hour guard that sends
+only Mondays or the first, including weekend firsts. Actual deployment and durable
+Redis verification remain pending review. Run the mail-free collector every
+calendar day (including weekends), at `0 9,10 * * *` UTC (4 AM Central), with command
+`node capture-missing-parts-kpi.js --apply`, the same `MONDAY_API_TOKEN` and durable
+`REDIS_URL`. Its local-time guard skips the unused DST companion hour. Keep the
+movement email on its existing weekday 5 AM schedule. The separate KPI email and
+collector use the same store; 4 AM collection precedes the 7 AM email. If
+changing that hour, align the UTC schedule and `MISSING_PARTS_KPI_CAPTURE_HOUR`.
+The first run after a month boundary reconstructs exact midnight from item-level
+activity; it never substitutes the morning open count for month-end.
+
+**Historical evidence and controls:** available retained intake and reconstructed
+backlog are now shown as labelled estimates rather than hidden until acceptance.
+`missing-parts-kpi-review.js` overlays review values only on unavailable periods;
+it never writes a historical boundary or accepted version. New issues use retained
+Order Dates and current classification/cancellation; reconstructed backlog uses
+cutoff classification/status. Unsupported backlog stays unavailable, not zero.
+Accepted authoritative controls always override estimates. Entirely unsupported
+months are omitted from the displayed matrix. Bootstrap in
+the middle of a month leaves that month's intake coverage incomplete. A completed
+boundary remains pending acceptance; exceptions block acceptance.
+
+Admin commands default to review-only. `--apply` explicitly saves their changes:
+
+```text
+node manage-missing-parts-kpi.js --import control.json --reviewer "Eric Fowler" --reason "Verified monthly source"
+node manage-missing-parts-kpi.js --accept 2026-09 --reviewer "Eric Fowler" --reason "Reconciled to approved control"
+node manage-missing-parts-kpi.js --correct revised-control.json --reviewer "Eric Fowler" --reason "Documented correction"
+```
+
+Controls contain `month`, exact UTC `cutoff`, `source` with `kind: authoritative`,
+`title` and `reference`, `completeness` for `newIssues` and `backorders`, and
+`records` containing distinct `id`, `category`, cutoff `status`, `state`,
+`orderDate` and nonempty `sourceIds`. Optional `totals` must reconcile to all five
+computed metrics. Categories are `factory`, `field`, `warranty`, `mixed`,
+`otherField` or `outside`. Corrections preserve prior versions, reviewer, reason
+and the control's content hash. Use `--state local.json` for an isolated review
+store; production requires Redis.
+
+Read-only previews send no mail or history writes:
+
+```text
+npm run kpi:preview
+node generate-missing-parts-kpi-report.js --source-file output/vince-kpi-poc/source-data.json --state output/vince-kpi-implementation/review-ledger.json --output-dir output/vince-kpi-weekly
+npm run kpi:test
+npm run movement:test
+```
+
+The source-file option is restricted to previews/dry runs. The collector's
+`--source-file` option is also forbidden on Render. Preview capture projections
+are not stored unless the separate collector is intentionally run with `--apply`.
+
 ## Cancellation and shipment rules
 
 Current `Cancelled` items are excluded before activity, ownership, priority,

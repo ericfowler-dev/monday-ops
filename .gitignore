@@ -6,6 +6,8 @@ exports/
 history-snap-orders.json
 history-weekly-movement.json
 history-dynamic-owner.json
+history-missing-parts-kpi.json
+history-missing-parts-kpi.json.*
 last-run-snap-orders.txt
 last-run-weekly-movement.txt
 node_modules/
