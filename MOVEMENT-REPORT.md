@@ -21,7 +21,7 @@ Detailed order/customer/tracking information remains in the live Monday views.
 The report covers Factory SNAP and Field Service, not the whole board's drafts
 and other factory request groups. Counts are board lines, not ordered quantity.
 
-## Missing Parts KPI implementation (October 8, 2026; pending deployment)
+## Missing Parts KPI implementation (deployed October 8, 2026)
 
 Following Eric's review, the KPI is a separate email, with four rows: Factory
 SNAPs - New Issues; Field Missing Parts - New Issues; Factory SNAPs - Backorders;
@@ -32,6 +32,15 @@ The movement email omits KPI collection/sections by default; the optional
 `MISSING_PARTS_KPI_ENABLED=1` integration is retained for future use.
 
 The standalone entry point is `generate-missing-parts-kpi-report.js --send`.
+The new services deploy the dedicated `missing-parts-kpi-report` branch, leaving
+the existing movement service on `main` at its prior deployed commit.
+Email service: `crn-db3sds7lk1mc73co8ig0` (`missing-parts-kpi-report`).
+Capture service: `crn-db3se02d0e5s73bcok30` (`missing-parts-kpi-capture`).
+Initial live capture succeeded against Redis with 1,156 ledger items. A production
+verification email with both CSV attachments was sent to efowler@psiengines.com
+on October 8, 2026 at 11:44 AM Central. All 77 calculation, rendering and schedule
+tests passed. Both jobs are active with automatic code deployment disabled;
+future changes require an explicit Render deploy.
 Confirmed distribution: **efowler@psiengines.com, Mondays and the first of each
 month at 7:00 AM America/Chicago**, observing daylight-saving changes. An overlap
 produces one email. Both CSVs are attached; the focused HTML extract uses the same
@@ -58,11 +67,15 @@ fail and must reload, rather than overwrite another capture/correction. Daily
 observations and accepted source versions are append-only; no automatic retention
 purge removes accepted periods.
 
-**Deployment draft:** `render-missing-parts-kpi.yaml` declares the separate email
-and collector jobs, with independent credentials/settings in an environment group.
+**Deployment configuration:** `render-missing-parts-kpi.yaml` declares the separate
+email and collector jobs. The deployed services were created with the Render CLI;
+required Monday, mail and Redis credentials were copied directly from the existing
+movement service without storing secret values in the repository. Each service has
+its own delivery/capture settings. The Blueprint's environment group provides the
+equivalent configuration for future infrastructure management.
 The email schedule is `0 12,13 * * *` UTC, with a Central day/hour guard that sends
-only Mondays or the first, including weekend firsts. Actual deployment and durable
-Redis verification remain pending review. Run the mail-free collector every
+only Mondays or the first, including weekend firsts. Both deployments are live;
+the initial live capture verified durable Redis persistence. Run the mail-free collector every
 calendar day (including weekends), at `0 9,10 * * *` UTC (4 AM Central), with command
 `node capture-missing-parts-kpi.js --apply`, the same `MONDAY_API_TOKEN` and durable
 `REDIS_URL`. Its local-time guard skips the unused DST companion hour. Keep the
