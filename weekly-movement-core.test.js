@@ -50,6 +50,16 @@ test('ownerFor resolves plain, split, informational, and unmapped statuses', () 
     assert.deepEqual(ownerFor('Mystery Stage', 'snap', OWNER_MAP), { unmapped: true });
 });
 
+test('current location-neutral statuses use confirmed primary owners', () => {
+    const { OWNER_MAP } = require('./weekly-movement-report.config');
+    for (const population of ['snap', 'fieldService']) {
+        assert.deepEqual(ownerFor('Pick/Materials', population, OWNER_MAP), { owner: 'Dan Goldbeck' });
+        assert.deepEqual(ownerFor('Staged', population, OWNER_MAP), { owner: 'Jessica Sanchez' });
+        assert.deepEqual(ownerFor('Pick/Materials (Darien)', population, OWNER_MAP), { owner: 'Mark Rodriguez' });
+        assert.deepEqual(ownerFor('Staged in Darien', population, OWNER_MAP), { owner: 'Thania Sandoval' });
+    }
+});
+
 test('snapshotItem normalizes fields and serializes dates', () => {
     const snapshot = snapshotItem({
         name: 'SNAP-9', currentStatus: ' FAB ', quantity: ' 2.0 ',

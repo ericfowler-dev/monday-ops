@@ -54,9 +54,11 @@ module.exports = {
         'In PC': 'Jack Richards', // hands off to Pick/Materials once back from PC
         'FAB': 'Jessica Hernandez',
         'Beloit WH': 'Mark Rodriguez',
+        'Pick/Materials': 'Dan Goldbeck', // current location-neutral status; confirmed 2026-11-11
         'Pick/Materials (Darien)': 'Mark Rodriguez', // with Jessica Sanchez and Stacie Knutsen
         'Shipped to Darien': 'Mark Rodriguez', // with Jessica Sanchez and Stacie Knutsen
         'Staged in Darien': 'Thania Sandoval',
+        'Staged': 'Jessica Sanchez', // primary; with Elizabeth Gomez, Giorgina and Thania Sandoval
         'Shipment Complication': 'Thania Sandoval',
         'Approved for Shipment': 'Jessica Sanchez', // after Thania provides a DDL pick-up date
         'Project Management': 'Clare Heckert',
